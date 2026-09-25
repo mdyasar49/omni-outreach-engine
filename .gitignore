@@ -1,8 +1,9 @@
 node_modules/
 dist/
+build/
 .env
-.env*
 *.env
+!server/.env.example
 credentials/
 *credentials*.json
 .wrangler/
@@ -10,4 +11,3 @@ __pycache__/
 *.pyc
 .DS_Store
 *.log
-
