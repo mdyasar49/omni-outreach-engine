@@ -353,13 +353,199 @@ app.post('/api/recipients/verify-mx', (req, res) => {
 });
 
 // ==========================================
-// 4. DISPATCH ENGINE (Real-Time Outreach)
+// 4. SPREADSHEET & EXCEL MULTI-TAB API
+// ==========================================
+const XLSX = require('xlsx');
+
+// Extract Google Sheet ID from any format URL
+function extractGoogleSheetId(url) {
+  if (!url) return null;
+  const match = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+  return match ? match[1] : null;
+}
+
+// Auto-detect columns (email, name, company, city) from rows
+function analyzeColumns(headers, rows) {
+  const colMap = { email: null, name: null, company: null, city: null };
+  const lowerHeaders = headers.map(h => String(h || '').toLowerCase().trim());
+
+  // Detect Email Column
+  const emailKeywords = ['work email', 'email', 'e-mail', 'mail', 'email address', 'contact email'];
+  for (let kw of emailKeywords) {
+    const idx = lowerHeaders.findIndex(h => h.includes(kw));
+    if (idx !== -1) { colMap.email = headers[idx]; break; }
+  }
+  if (!colMap.email) {
+    // Check row values for @
+    for (let c = 0; c < headers.length; c++) {
+      if (rows.some(r => r[c] && String(r[c]).includes('@') && String(r[c]).includes('.'))) {
+        colMap.email = headers[c];
+        break;
+      }
+    }
+  }
+
+  // Detect Name Column
+  const nameKeywords = ['contact person', 'name', 'full name', 'person name', 'lead name', 'first name'];
+  for (let kw of nameKeywords) {
+    const idx = lowerHeaders.findIndex(h => h.includes(kw));
+    if (idx !== -1) { colMap.name = headers[idx]; break; }
+  }
+
+  // Detect Company Column
+  const compKeywords = ['company', 'agency', 'company / agency name', 'organization', 'business name'];
+  for (let kw of compKeywords) {
+    const idx = lowerHeaders.findIndex(h => h.includes(kw));
+    if (idx !== -1) { colMap.company = headers[idx]; break; }
+  }
+
+  // Detect City Column
+  const cityKeywords = ['city', 'location', 'place', 'city / place', 'region'];
+  for (let kw of cityKeywords) {
+    const idx = lowerHeaders.findIndex(h => h.includes(kw));
+    if (idx !== -1) { colMap.city = headers[idx]; break; }
+  }
+
+  return colMap;
+}
+
+app.post('/api/sheets/load-url', async (req, res) => {
+  const { url } = req.body;
+  if (!url) return res.status(400).json({ error: 'Please provide a valid Google Spreadsheet URL' });
+
+  const sheetId = extractGoogleSheetId(url);
+  if (!sheetId) {
+    return res.status(400).json({ error: 'Could not extract valid Google Spreadsheet ID from the URL. Please verify the link format.' });
+  }
+
+  try {
+    const exportUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=xlsx`;
+    const response = await fetch(exportUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    });
+
+    if (!response.ok) {
+      return res.status(400).json({
+        error: `Failed to download sheet (${response.status} ${response.statusText}). Ensure the Google Sheet is set to 'Anyone with the link can view' (Share > General Access > Anyone with the link).`
+      });
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const workbook = XLSX.read(Buffer.from(arrayBuffer), { type: 'buffer' });
+
+    const tabs = workbook.SheetNames.map(sheetName => {
+      const sheet = workbook.Sheets[sheetName];
+      const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+      if (rawData.length === 0) {
+        return { name: sheetName, row_count: 0, headers: [], rows: [], detected_columns: {} };
+      }
+
+      // First non-empty row as header
+      const headerRowIndex = rawData.findIndex(r => r.some(cell => String(cell).trim() !== ''));
+      const headers = headerRowIndex !== -1 ? rawData[headerRowIndex].map(h => String(h).trim()) : [];
+      const dataRows = headerRowIndex !== -1 ? rawData.slice(headerRowIndex + 1).filter(r => r.some(c => String(c).trim() !== '')) : [];
+
+      const colMap = analyzeColumns(headers, dataRows);
+
+      // Convert rows to key-value objects
+      const formattedRows = dataRows.map((row, idx) => {
+        const obj = { _row_index: idx + 1 };
+        headers.forEach((h, colIdx) => {
+          if (h) obj[h] = row[colIdx] !== undefined ? String(row[colIdx]).trim() : '';
+        });
+        // Extracted shortcuts
+        obj._detected_email = colMap.email ? obj[colMap.email] : '';
+        obj._detected_name = colMap.name ? obj[colMap.name] : 'Prospective Partner';
+        obj._detected_company = colMap.company ? obj[colMap.company] : 'Your Agency';
+        obj._detected_city = colMap.city ? obj[colMap.city] : 'your region';
+        return obj;
+      });
+
+      return {
+        name: sheetName,
+        row_count: formattedRows.length,
+        headers,
+        detected_columns: colMap,
+        rows: formattedRows
+      };
+    });
+
+    res.json({
+      success: true,
+      sheet_id: sheetId,
+      total_tabs: tabs.length,
+      tabs
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Error reading Google Sheet: ' + err.message });
+  }
+});
+
+// Parse uploaded XLSX / XLS / CSV buffer (base64)
+app.post('/api/sheets/parse-buffer', (req, res) => {
+  const { file_base64, filename } = req.body;
+  if (!file_base64) return res.status(400).json({ error: 'No file data received' });
+
+  try {
+    const buffer = Buffer.from(file_base64, 'base64');
+    const workbook = XLSX.read(buffer, { type: 'buffer' });
+
+    const tabs = workbook.SheetNames.map(sheetName => {
+      const sheet = workbook.Sheets[sheetName];
+      const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+      if (rawData.length === 0) {
+        return { name: sheetName, row_count: 0, headers: [], rows: [], detected_columns: {} };
+      }
+
+      const headerRowIndex = rawData.findIndex(r => r.some(cell => String(cell).trim() !== ''));
+      const headers = headerRowIndex !== -1 ? rawData[headerRowIndex].map(h => String(h).trim()) : [];
+      const dataRows = headerRowIndex !== -1 ? rawData.slice(headerRowIndex + 1).filter(r => r.some(c => String(c).trim() !== '')) : [];
+
+      const colMap = analyzeColumns(headers, dataRows);
+      const formattedRows = dataRows.map((row, idx) => {
+        const obj = { _row_index: idx + 1 };
+        headers.forEach((h, colIdx) => {
+          if (h) obj[h] = row[colIdx] !== undefined ? String(row[colIdx]).trim() : '';
+        });
+        obj._detected_email = colMap.email ? obj[colMap.email] : '';
+        obj._detected_name = colMap.name ? obj[colMap.name] : 'Prospective Partner';
+        obj._detected_company = colMap.company ? obj[colMap.company] : 'Your Agency';
+        obj._detected_city = colMap.city ? obj[colMap.city] : 'your region';
+        return obj;
+      });
+
+      return {
+        name: sheetName,
+        row_count: formattedRows.length,
+        headers,
+        detected_columns: colMap,
+        rows: formattedRows
+      };
+    });
+
+    res.json({
+      success: true,
+      filename: filename || 'Uploaded Workbook',
+      total_tabs: tabs.length,
+      tabs
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to parse file: ' + err.message });
+  }
+});
+
+// ==========================================
+// 5. DISPATCH ENGINE (Real-Time Outreach)
 // ==========================================
 let activeDispatchProcess = null;
 let dispatchStatus = {
   running: false,
   total: 0,
   sent: 0,
+  delivered: 0,
+  bounced: 0,
   failed: 0,
   skipped: 0,
   current: '',
@@ -375,10 +561,12 @@ app.post('/api/dispatch/start', (req, res) => {
     return res.status(400).json({ error: 'A dispatch campaign is already running' });
   }
 
-  const { account_id, template_id, delay_seconds, only_verified } = req.body;
+  const { account_id, template_id, delay_seconds, only_verified, custom_recipients, batch_label } = req.body;
   const accounts = readJSON(ACCOUNTS_FILE, []);
   const templates = readJSON(TEMPLATES_FILE, []);
-  let recipients = readJSON(RECIPIENTS_FILE, []);
+  let recipients = Array.isArray(custom_recipients) && custom_recipients.length > 0
+    ? custom_recipients
+    : readJSON(RECIPIENTS_FILE, []);
 
   const account = account_id ? accounts.find(a => a.id === account_id) : accounts.find(a => a.is_default);
   const template = templates.find(t => t.id === template_id) || templates[0];
@@ -394,6 +582,15 @@ app.post('/api/dispatch/start', (req, res) => {
     return res.status(400).json({ error: 'No recipients available for dispatch' });
   }
 
+  // Normalize recipient objects so template tags work seamlessly
+  const normalizedRecipients = recipients.map(r => ({
+    email: (r.email || r._detected_email || '').toLowerCase().trim(),
+    name: r.name || r._detected_name || 'Prospective Partner',
+    company: r.company || r._detected_company || 'Your Agency',
+    city: r.city || r._detected_city || 'your region',
+    ...r
+  }));
+
   const payload = {
     account,
     campaign: {
@@ -402,12 +599,12 @@ app.post('/api/dispatch/start', (req, res) => {
       html_template: template.html_content,
       text_template: ""
     },
-    recipients,
+    recipients: normalizedRecipients,
     options: {
       delay_seconds: parseFloat(delay_seconds) || 5.0,
       verify_mx: true,
       save_to_sent: true,
-      label_name: "Outreach-Omni"
+      label_name: batch_label || "Outreach-Omni"
     }
   };
 
@@ -416,8 +613,10 @@ app.post('/api/dispatch/start', (req, res) => {
 
   dispatchStatus = {
     running: true,
-    total: recipients.length,
+    total: normalizedRecipients.length,
     sent: 0,
+    delivered: 0,
+    bounced: 0,
     failed: 0,
     skipped: 0,
     current: 'Initializing connection...',
@@ -435,18 +634,23 @@ app.post('/api/dispatch/start', (req, res) => {
         const msg = JSON.parse(line.trim());
         if (msg.type === 'progress') {
           const item = msg.item;
-          if (item.status === 'sent') dispatchStatus.sent++;
-          else if (item.status === 'failed') dispatchStatus.failed++;
-          else if (item.status === 'skipped') dispatchStatus.skipped++;
+          if (item.status === 'sent') {
+            dispatchStatus.sent++;
+            dispatchStatus.delivered++;
+          } else if (item.status === 'failed') {
+            dispatchStatus.failed++;
+          } else if (item.status === 'skipped') {
+            dispatchStatus.skipped++;
+          } else if (item.status === 'bounced') {
+            dispatchStatus.bounced++;
+          }
           dispatchStatus.current = `${item.status.toUpperCase()}: ${item.email}`;
           dispatchStatus.logs.push(item);
         } else if (msg.type === 'finished') {
           dispatchStatus.running = false;
           dispatchStatus.current = 'Completed';
         }
-      } catch (e) {
-        // Raw line
-      }
+      } catch (e) {}
     });
   });
 
@@ -455,7 +659,7 @@ app.post('/api/dispatch/start', (req, res) => {
     activeDispatchProcess = null;
   });
 
-  res.json({ success: true, message: 'Dispatch process started', total: recipients.length });
+  res.json({ success: true, message: 'Dispatch process started', total: normalizedRecipients.length });
 });
 
 app.post('/api/dispatch/stop', (req, res) => {
@@ -470,7 +674,7 @@ app.post('/api/dispatch/stop', (req, res) => {
 });
 
 // ==========================================
-// 5. STATS & OVERVIEW API
+// 6. STATS & OVERVIEW API
 // ==========================================
 app.get('/api/stats', (req, res) => {
   const accounts = readJSON(ACCOUNTS_FILE, []);
@@ -484,7 +688,10 @@ app.get('/api/stats', (req, res) => {
     recipients_count: recipients.length,
     verified_mx_count: recipients.filter(r => r.mx_status === 'verified').length,
     dead_domain_count: recipients.filter(r => r.mx_status === 'dead_domain').length,
-    dispatched_count: dispatchStatus.sent
+    dispatched_count: dispatchStatus.sent,
+    delivered_count: dispatchStatus.delivered,
+    bounced_count: dispatchStatus.bounced,
+    skipped_count: dispatchStatus.skipped
   });
 });
 

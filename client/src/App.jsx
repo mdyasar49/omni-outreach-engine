@@ -1,14 +1,17 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import * as XLSX from 'xlsx';
 import {
   Send, Mail, Users, FileText, Settings, ShieldCheck, CheckCircle2,
   AlertTriangle, XCircle, Play, Square, Plus, Trash2, RefreshCw, Eye,
-  Globe, Server, ArrowRight, Layers, BarChart3, Database, KeyRound
+  Globe, Server, ArrowRight, Layers, BarChart3, Database, KeyRound,
+  FileSpreadsheet, Upload, Link as LinkIcon, HelpCircle, ExternalLink,
+  ChevronRight, Filter, Search, Download, Info
 } from 'lucide-react';
 
 const API_BASE = 'http://localhost:4000/api';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('dashboard');
+  const [activeTab, setActiveTab] = useState('sheet_studio'); // Default to the newly requested Sheet Studio!
   const [stats, setStats] = useState({
     accounts_count: 1,
     default_sender: 'infogenx.dm@gmail.com',
@@ -16,13 +19,36 @@ export default function App() {
     recipients_count: 65,
     verified_mx_count: 65,
     dead_domain_count: 0,
-    dispatched_count: 0
+    dispatched_count: 0,
+    delivered_count: 0,
+    bounced_count: 0,
+    skipped_count: 0
   });
 
   const [accounts, setAccounts] = useState([]);
   const [templates, setTemplates] = useState([]);
   const [recipients, setRecipients] = useState([]);
-  const [dispatchStatus, setDispatchStatus] = useState({ running: false, total: 0, sent: 0, failed: 0, skipped: 0, current: '', logs: [] });
+  const [dispatchStatus, setDispatchStatus] = useState({
+    running: false, total: 0, sent: 0, delivered: 0, bounced: 0, failed: 0, skipped: 0, current: '', logs: []
+  });
+
+  // ==========================================
+  // SPREADSHEET & EXCEL MULTI-TAB STATE
+  // ==========================================
+  const [sheetUrl, setSheetUrl] = useState('https://docs.google.com/spreadsheets/d/1vl5moxgRvXo-rJOFPYphtqgROb1L29hYxe8JhRQfHE0/edit?gid=1245949174#gid=1245949174');
+  const [sheetLoading, setSheetLoading] = useState(false);
+  const [sheetError, setSheetError] = useState(null);
+  const [sheetData, setSheetData] = useState(null); // { sheet_id, total_tabs, tabs: [...] }
+  const [activeSheetTabIdx, setActiveSheetTabIdx] = useState(0);
+  const [sheetSearchQuery, setSheetSearchQuery] = useState('');
+  const [showHowToShareModal, setShowHowToShareModal] = useState(false);
+  const [showAppPasswordGuide, setShowAppPasswordGuide] = useState(false);
+  const fileInputRef = useRef(null);
+
+  // Dispatch from Sheet Modal
+  const [dispatchModalOpen, setDispatchModalOpen] = useState(false);
+  const [dispatchScope, setDispatchScope] = useState('current_tab'); // 'current_tab' | 'all_tabs'
+  const [dispatchSummaryReport, setDispatchSummaryReport] = useState(null);
 
   // Account Form Modal
   const [showAddAccount, setShowAddAccount] = useState(false);
@@ -51,17 +77,12 @@ export default function App() {
     sender_email: 'infogenx.dm@gmail.com'
   });
 
-  // Recipient Import
-  const [showAddRecipient, setShowAddRecipient] = useState(false);
-  const [manualRecipientsText, setManualRecipientsText] = useState('');
-  const [verifyingMX, setVerifyingMX] = useState(false);
-
   // Dispatch Config
   const [dispatchConfig, setDispatchConfig] = useState({
     account_id: '',
     template_id: '',
     delay_seconds: 5,
-    only_verified: true
+    only_verified: false
   });
 
   // Fetch initial data
@@ -76,9 +97,9 @@ export default function App() {
       ]);
 
       if (resStats) setStats(resStats);
-      if (resAccs) {
+      if (resAccs && resAccs.length > 0) {
         setAccounts(resAccs);
-        const defAcc = resAccs.find(a => a.is_default);
+        const defAcc = resAccs.find(a => a.is_default) || resAccs[0];
         if (defAcc && !dispatchConfig.account_id) {
           setDispatchConfig(prev => ({ ...prev, account_id: defAcc.id }));
         }
@@ -94,14 +115,31 @@ export default function App() {
         }
       }
       if (resRecs) setRecipients(resRecs);
-      if (resDisp) setDispatchStatus(resDisp);
+      if (resDisp) {
+        setDispatchStatus(resDisp);
+        if (resDisp.running) {
+          setDispatchSummaryReport(null);
+        } else if (!resDisp.running && resDisp.sent > 0 && !dispatchSummaryReport) {
+          setDispatchSummaryReport({
+            total: resDisp.total,
+            sent: resDisp.sent,
+            delivered: resDisp.delivered || resDisp.sent,
+            skipped: resDisp.skipped,
+            bounced: resDisp.bounced,
+            failed: resDisp.failed
+          });
+        }
+      }
     } catch (err) {
-      console.error("Failed to fetch dashboard data:", err);
+      console.error("Dashboard fetch error:", err);
     }
   };
 
   useEffect(() => {
     fetchData();
+    // Auto load default sample Google Sheet on mount
+    loadGoogleSheetUrl(sheetUrl);
+
     const interval = setInterval(async () => {
       try {
         const d = await fetch(`${API_BASE}/dispatch/status`).then(r => r.json());
@@ -109,49 +147,196 @@ export default function App() {
         if (d.running) {
           const s = await fetch(`${API_BASE}/stats`).then(r => r.json());
           setStats(s);
+        } else if (d.sent > 0 && !dispatchSummaryReport) {
+          setDispatchSummaryReport({
+            total: d.total,
+            sent: d.sent,
+            delivered: d.delivered || d.sent,
+            skipped: d.skipped,
+            bounced: d.bounced,
+            failed: d.failed
+          });
         }
       } catch (e) {}
     }, 2500);
     return () => clearInterval(interval);
   }, []);
 
-  // Set Default Account
-  const setDefaultAccount = async (id) => {
-    try {
-      await fetch(`${API_BASE}/accounts/${id}/set-default`, { method: 'POST' });
-      fetchData();
-    } catch (err) {
-      alert("Failed to update active account: " + err.message);
+  // ==========================================
+  // SPREADSHEET PARSING FUNCTIONS
+  // ==========================================
+  const loadGoogleSheetUrl = async (urlToLoad) => {
+    const targetUrl = urlToLoad || sheetUrl;
+    if (!targetUrl.trim()) {
+      setSheetError("Please enter a Google Spreadsheet URL");
+      return;
     }
-  };
-
-  // Delete Account
-  const deleteAccount = async (id) => {
-    if (!window.confirm("Are you sure you want to remove this account?")) return;
+    setSheetLoading(true);
+    setSheetError(null);
     try {
-      await fetch(`${API_BASE}/accounts/${id}`, { method: 'DELETE' });
-      fetchData();
-    } catch (err) {
-      alert("Failed to remove account: " + err.message);
-    }
-  };
-
-  // Test Account Connection
-  const handleTestAccount = async () => {
-    setAccountTestLoading(true);
-    setAccountTestResult(null);
-    try {
-      const res = await fetch(`${API_BASE}/accounts/test`, {
+      const res = await fetch(`${API_BASE}/sheets/load-url`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(accountForm)
+        body: JSON.stringify({ url: targetUrl.trim() })
       });
       const data = await res.json();
-      setAccountTestResult(data);
+      if (data.success) {
+        setSheetData(data);
+        setActiveSheetTabIdx(0);
+      } else {
+        setSheetError(data.error || "Failed to load Google Sheet. Ensure access is set to 'Anyone with the link'.");
+      }
     } catch (err) {
-      setAccountTestResult({ success: false, error: err.message });
+      setSheetError("Network error loading Google Sheet: " + err.message);
     } finally {
-      setAccountTestLoading(false);
+      setSheetLoading(false);
+    }
+  };
+
+  // Handle Local Excel / CSV File Upload
+  const handleFileUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    setSheetLoading(true);
+    setSheetError(null);
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const data = new Uint8Array(evt.target.result);
+        const workbook = XLSX.read(data, { type: 'array' });
+
+        const tabs = workbook.SheetNames.map(sheetName => {
+          const sheet = workbook.Sheets[sheetName];
+          const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+          if (rawData.length === 0) {
+            return { name: sheetName, row_count: 0, headers: [], rows: [], detected_columns: {} };
+          }
+
+          const headerRowIndex = rawData.findIndex(r => r.some(cell => String(cell).trim() !== ''));
+          const headers = headerRowIndex !== -1 ? rawData[headerRowIndex].map(h => String(h).trim()) : [];
+          const dataRows = headerRowIndex !== -1 ? rawData.slice(headerRowIndex + 1).filter(r => r.some(c => String(c).trim() !== '')) : [];
+
+          // Column Detection
+          const lowerHeaders = headers.map(h => String(h || '').toLowerCase().trim());
+          const colMap = { email: null, name: null, company: null, city: null };
+
+          const emailKw = ['work email', 'email', 'e-mail', 'mail', 'email address', 'contact email'];
+          for (let kw of emailKw) {
+            const idx = lowerHeaders.findIndex(h => h.includes(kw));
+            if (idx !== -1) { colMap.email = headers[idx]; break; }
+          }
+          if (!colMap.email) {
+            for (let c = 0; c < headers.length; c++) {
+              if (dataRows.some(r => r[c] && String(r[c]).includes('@') && String(r[c]).includes('.'))) {
+                colMap.email = headers[c];
+                break;
+              }
+            }
+          }
+
+          const nameKw = ['contact person', 'name', 'full name', 'person name', 'lead name', 'first name'];
+          for (let kw of nameKw) {
+            const idx = lowerHeaders.findIndex(h => h.includes(kw));
+            if (idx !== -1) { colMap.name = headers[idx]; break; }
+          }
+
+          const compKw = ['company', 'agency', 'company / agency name', 'organization', 'business name'];
+          for (let kw of compKw) {
+            const idx = lowerHeaders.findIndex(h => h.includes(kw));
+            if (idx !== -1) { colMap.company = headers[idx]; break; }
+          }
+
+          const cityKw = ['city', 'location', 'place', 'city / place', 'region'];
+          for (let kw of cityKw) {
+            const idx = lowerHeaders.findIndex(h => h.includes(kw));
+            if (idx !== -1) { colMap.city = headers[idx]; break; }
+          }
+
+          const formattedRows = dataRows.map((row, idx) => {
+            const obj = { _row_index: idx + 1 };
+            headers.forEach((h, colIdx) => {
+              if (h) obj[h] = row[colIdx] !== undefined ? String(row[colIdx]).trim() : '';
+            });
+            obj._detected_email = colMap.email ? obj[colMap.email] : '';
+            obj._detected_name = colMap.name ? obj[colMap.name] : 'Prospective Partner';
+            obj._detected_company = colMap.company ? obj[colMap.company] : 'Your Agency';
+            obj._detected_city = colMap.city ? obj[colMap.city] : 'your region';
+            return obj;
+          });
+
+          return {
+            name: sheetName,
+            row_count: formattedRows.length,
+            headers,
+            detected_columns: colMap,
+            rows: formattedRows
+          };
+        });
+
+        setSheetData({
+          filename: file.name,
+          total_tabs: tabs.length,
+          tabs
+        });
+        setActiveSheetTabIdx(0);
+      } catch (err) {
+        setSheetError("Failed to parse file: " + err.message);
+      } finally {
+        setSheetLoading(false);
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  // Launch One-by-One Dispatch for Active Tab
+  const launchDispatchForSheet = async () => {
+    if (!sheetData || !sheetData.tabs || sheetData.tabs.length === 0) {
+      alert("No sheet loaded to dispatch!");
+      return;
+    }
+
+    const currentTab = sheetData.tabs[activeSheetTabIdx];
+    let targetRecipients = [];
+
+    if (dispatchScope === 'current_tab') {
+      targetRecipients = currentTab.rows.filter(r => r._detected_email && r._detected_email.includes('@'));
+    } else {
+      // All tabs
+      sheetData.tabs.forEach(t => {
+        const validRows = t.rows.filter(r => r._detected_email && r._detected_email.includes('@'));
+        targetRecipients.push(...validRows);
+      });
+    }
+
+    if (targetRecipients.length === 0) {
+      alert("Could not detect any valid email addresses in the selected rows. Please verify column headers.");
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/dispatch/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          account_id: dispatchConfig.account_id,
+          template_id: dispatchConfig.template_id,
+          delay_seconds: dispatchConfig.delay_seconds,
+          custom_recipients: targetRecipients,
+          batch_label: `Sheet-Tab-${currentTab.name}`
+        })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setDispatchModalOpen(false);
+        setActiveTab('dispatch');
+        setDispatchSummaryReport(null);
+      } else {
+        alert(data.error || "Failed to start dispatch");
+      }
+    } catch (err) {
+      alert(err.message);
     }
   };
 
@@ -179,12 +364,42 @@ export default function App() {
         });
         setAccountTestResult(null);
         fetchData();
+        alert("Account connected successfully!");
       } else {
         const err = await res.json();
         alert(err.error || 'Failed to add account');
       }
     } catch (err) {
       alert(err.message);
+    }
+  };
+
+  // Test Account Connection
+  const handleTestAccount = async () => {
+    setAccountTestLoading(true);
+    setAccountTestResult(null);
+    try {
+      const res = await fetch(`${API_BASE}/accounts/test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(accountForm)
+      });
+      const data = await res.json();
+      setAccountTestResult(data);
+    } catch (err) {
+      setAccountTestResult({ success: false, error: err.message });
+    } finally {
+      setAccountTestLoading(false);
+    }
+  };
+
+  // Set Default Account
+  const setDefaultAccount = async (id) => {
+    try {
+      await fetch(`${API_BASE}/accounts/${id}/set-default`, { method: 'POST' });
+      fetchData();
+    } catch (err) {
+      alert("Failed to update active account: " + err.message);
     }
   };
 
@@ -211,88 +426,7 @@ export default function App() {
     }
   };
 
-  // Real-time DNS MX Verification
-  const runMXVerification = async () => {
-    setVerifyingMX(true);
-    try {
-      const res = await fetch(`${API_BASE}/recipients/verify-mx`, { method: 'POST' });
-      const data = await res.json();
-      if (data.success) {
-        setRecipients(data.recipients);
-        fetchData();
-        alert(`MX Verification Complete! Verified: ${data.verified_count} / ${data.total} recipients`);
-      } else {
-        alert(data.error || 'MX check failed');
-      }
-    } catch (err) {
-      alert('Error during MX check: ' + err.message);
-    } finally {
-      setVerifyingMX(false);
-    }
-  };
-
-  // Add Recipients Bulk
-  const handleAddRecipientsBulk = async () => {
-    const lines = manualRecipientsText.split('\n').filter(l => l.trim());
-    const list = lines.map(line => {
-      const parts = line.split(',').map(p => p.trim());
-      return {
-        email: parts[0],
-        name: parts[1] || 'Prospective Partner',
-        company: parts[2] || 'Enterprise Partner',
-        city: parts[3] || 'Tamil Nadu'
-      };
-    });
-
-    if (list.length === 0) return alert("Please enter valid recipients");
-
-    try {
-      const res = await fetch(`${API_BASE}/recipients`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ list })
-      });
-      const data = await res.json();
-      if (data.success) {
-        setManualRecipientsText('');
-        setShowAddRecipient(false);
-        fetchData();
-        alert(`Added ${data.count} new recipients!`);
-      }
-    } catch (err) {
-      alert(err.message);
-    }
-  };
-
-  // Start Dispatch
-  const handleStartDispatch = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/dispatch/start`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(dispatchConfig)
-      });
-      const data = await res.json();
-      if (data.success) {
-        setDispatchStatus(prev => ({ ...prev, running: true }));
-      } else {
-        alert(data.error || 'Failed to start dispatch');
-      }
-    } catch (err) {
-      alert(err.message);
-    }
-  };
-
-  // Stop Dispatch
-  const handleStopDispatch = async () => {
-    try {
-      await fetch(`${API_BASE}/dispatch/stop`, { method: 'POST' });
-    } catch (err) {
-      alert(err.message);
-    }
-  };
-
-  // Render Template Interpolation
+  // Render Template Interpolation Preview
   const renderPreviewHTML = (tmplStr) => {
     if (!tmplStr) return '';
     let rendered = tmplStr;
@@ -302,40 +436,58 @@ export default function App() {
     return rendered;
   };
 
+  const activeTabObj = sheetData?.tabs?.[activeSheetTabIdx];
+  const filteredRows = activeTabObj?.rows?.filter(r => {
+    if (!sheetSearchQuery) return true;
+    return Object.values(r).some(v => String(v).toLowerCase().includes(sheetSearchQuery.toLowerCase()));
+  }) || [];
+
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
       {/* Top Navbar */}
       <header style={{ background: '#0e1422', borderBottom: '1px solid var(--border-color)', padding: '0.85rem 0', position: 'sticky', top: 0, zIndex: 40 }}>
-        <div className="container" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div className="container" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.75rem' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-            <div style={{ width: '36px', height: '36px', borderRadius: '10px', background: 'linear-gradient(135deg, #3b82f6, #06b6d4)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', boxShadow: '0 4px 12px rgba(59, 130, 246, 0.4)' }}>
-              <Send size={20} />
+            <div style={{ width: '38px', height: '38px', borderRadius: '10px', background: 'linear-gradient(135deg, #3b82f6, #06b6d4)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', boxShadow: '0 4px 14px rgba(59, 130, 246, 0.4)' }}>
+              <FileSpreadsheet size={22} />
             </div>
             <div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <span style={{ fontSize: '1.15rem', fontWeight: 800, letterSpacing: '-0.02em', color: '#fff' }}>OmniReach</span>
-                <span className="badge badge-blue">Open Source</span>
+                <span style={{ fontSize: '1.2rem', fontWeight: 800, letterSpacing: '-0.02em', color: '#fff' }}>OmniReach</span>
+                <span className="badge badge-blue">Open Source Engine</span>
               </div>
-              <p style={{ fontSize: '0.725rem', color: 'var(--text-muted)' }}>Multi-Account Cold Email Automation & Zero-Bounce Engine</p>
+              <p style={{ fontSize: '0.725rem', color: 'var(--text-muted)' }}>Multi-Tab Excel &amp; Google Sheet Automation • Zero-Bounce Delivery</p>
             </div>
           </div>
 
-          {/* Quick Active Sender Switcher */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+          {/* Quick Header Actions */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+            {/* Active Sender Indicator */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#141d2e', padding: '0.4rem 0.85rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
               <span className="live-pulse"></span>
-              <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Active Sender:</span>
+              <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Sender:</span>
               <span style={{ fontSize: '0.8125rem', fontWeight: 600, color: '#38bdf8' }}>
                 {accounts.find(a => a.is_default)?.email || 'None Configured'}
               </span>
             </div>
 
+            {/* Quick App Password Helper Button */}
+            <button
+              onClick={() => setShowAppPasswordGuide(true)}
+              className="btn btn-outline"
+              style={{ fontSize: '0.75rem', padding: '0.45rem 0.8rem', borderColor: '#f59e0b', color: '#fbbf24' }}
+              title="How to generate Gmail App Password"
+            >
+              <KeyRound size={14} /> App Password Guide
+            </button>
+
+            {/* Add Sender Account */}
             <button
               onClick={() => { setActiveTab('accounts'); setShowAddAccount(true); }}
-              className="btn btn-outline"
+              className="btn btn-primary"
               style={{ fontSize: '0.75rem', padding: '0.45rem 0.8rem' }}
             >
-              <Plus size={14} /> Add Sender
+              <Plus size={14} /> Add Sender Account
             </button>
           </div>
         </div>
@@ -345,11 +497,11 @@ export default function App() {
       <div style={{ background: '#121929', borderBottom: '1px solid var(--border-color)' }}>
         <div className="container" style={{ display: 'flex', gap: '0.5rem', overflowX: 'auto', padding: '0.5rem 1.5rem' }}>
           {[
-            { id: 'dashboard', label: 'Dashboard & Metrics', icon: BarChart3 },
-            { id: 'accounts', label: 'Sender Accounts (Switcher)', icon: Settings, count: accounts.length },
+            { id: 'sheet_studio', label: 'Excel & Sheet Studio', icon: FileSpreadsheet, badge: sheetData?.total_tabs ? `${sheetData.total_tabs} Tabs` : null, highlight: true },
+            { id: 'dashboard', label: 'Dashboard & Reports', icon: BarChart3 },
+            { id: 'dispatch', label: 'Live Dispatch Console', icon: Send, pulse: dispatchStatus.running },
             { id: 'templates', label: 'Templates Studio', icon: FileText, count: templates.length },
-            { id: 'recipients', label: 'Recipients & Leads', icon: Users, count: recipients.length },
-            { id: 'dispatch', label: 'Live Dispatch Console', icon: Send, pulse: dispatchStatus.running }
+            { id: 'accounts', label: 'Sender Accounts (Switcher)', icon: Settings, count: accounts.length }
           ].map(tab => {
             const Icon = tab.icon;
             const active = activeTab === tab.id;
@@ -361,20 +513,22 @@ export default function App() {
                   display: 'flex',
                   alignItems: 'center',
                   gap: '0.5rem',
-                  padding: '0.65rem 1.1rem',
+                  padding: '0.65rem 1.15rem',
                   borderRadius: '8px',
                   border: 'none',
                   fontSize: '0.85rem',
-                  fontWeight: active ? 600 : 500,
+                  fontWeight: active ? 700 : 500,
                   cursor: 'pointer',
-                  background: active ? 'rgba(59, 130, 246, 0.15)' : 'transparent',
+                  background: active ? 'rgba(59, 130, 246, 0.18)' : 'transparent',
                   color: active ? '#60a5fa' : 'var(--text-secondary)',
                   borderBottom: active ? '2px solid #3b82f6' : '2px solid transparent',
-                  transition: 'all 0.15s ease'
+                  transition: 'all 0.15s ease',
+                  whiteSpace: 'nowrap'
                 }}
               >
                 <Icon size={16} />
                 <span>{tab.label}</span>
+                {tab.badge && <span className="badge badge-emerald" style={{ fontSize: '0.675rem', padding: '0.1rem 0.4rem' }}>{tab.badge}</span>}
                 {tab.count !== undefined && (
                   <span style={{ fontSize: '0.7rem', padding: '0.1rem 0.4rem', borderRadius: '10px', background: active ? '#2563eb' : '#1e293b', color: '#fff' }}>
                     {tab.count}
@@ -387,285 +541,346 @@ export default function App() {
         </div>
       </div>
 
-      {/* Main Body Content */}
+      {/* Main Content Area */}
       <main className="container" style={{ flex: 1, padding: '2rem 1.5rem' }}>
 
         {/* ============================================================ */}
-        {/* 1. DASHBOARD OVERVIEW                                        */}
+        {/* 1. EXCEL & SPREADSHEET STUDIO (Multi-Tab Interactive Viewer) */}
         {/* ============================================================ */}
-        {activeTab === 'dashboard' && (
+        {activeTab === 'sheet_studio' && (
           <div>
-            <div style={{ marginBottom: '1.5rem' }}>
-              <h1 style={{ fontSize: '1.5rem', fontWeight: 800 }}>Campaign & Delivery Dashboard</h1>
-              <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
-                Multi-threaded Cold Outreach engine with pre-flight DNS MX verification and dynamic sender routing.
-              </p>
-            </div>
-
-            {/* Stat Cards */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1.25rem', marginBottom: '2rem' }}>
-              <div className="glass-card">
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-                  <span style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>Verified Leads (Zero-Bounce)</span>
-                  <div style={{ background: 'rgba(16, 185, 129, 0.15)', padding: '0.4rem', borderRadius: '8px', color: '#10b981' }}>
-                    <ShieldCheck size={20} />
-                  </div>
-                </div>
-                <div style={{ fontSize: '2rem', fontWeight: 800, color: '#f8fafc' }}>
-                  {stats.verified_mx_count}
-                </div>
-                <div style={{ fontSize: '0.75rem', color: '#34d399', display: 'flex', alignItems: 'center', gap: '0.3rem', marginTop: '0.35rem' }}>
-                  <CheckCircle2 size={13} /> 100% Active DNS MX Records
-                </div>
-              </div>
-
-              <div className="glass-card">
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-                  <span style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>Configured Sender Accounts</span>
-                  <div style={{ background: 'rgba(59, 130, 246, 0.15)', padding: '0.4rem', borderRadius: '8px', color: '#3b82f6' }}>
-                    <Settings size={20} />
-                  </div>
-                </div>
-                <div style={{ fontSize: '2rem', fontWeight: 800, color: '#f8fafc' }}>
-                  {stats.accounts_count}
-                </div>
-                <div style={{ fontSize: '0.75rem', color: '#60a5fa', marginTop: '0.35rem' }}>
-                  Switch sender anytime with 1-click
-                </div>
-              </div>
-
-              <div className="glass-card">
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-                  <span style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>Available Templates</span>
-                  <div style={{ background: 'rgba(147, 51, 234, 0.15)', padding: '0.4rem', borderRadius: '8px', color: '#c084fc' }}>
-                    <FileText size={20} />
-                  </div>
-                </div>
-                <div style={{ fontSize: '2rem', fontWeight: 800, color: '#f8fafc' }}>
-                  {stats.templates_count}
-                </div>
-                <div style={{ fontSize: '0.75rem', color: '#c084fc', marginTop: '0.35rem' }}>
-                  Full variable interpolation ready
-                </div>
-              </div>
-
-              <div className="glass-card">
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-                  <span style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>Engine Dispatch Status</span>
-                  <div style={{ background: dispatchStatus.running ? 'rgba(16, 185, 129, 0.2)' : 'rgba(100, 116, 139, 0.2)', padding: '0.4rem', borderRadius: '8px', color: dispatchStatus.running ? '#10b981' : '#94a3b8' }}>
-                    <Send size={20} />
-                  </div>
-                </div>
-                <div style={{ fontSize: '1.25rem', fontWeight: 800, color: dispatchStatus.running ? '#34d399' : '#94a3b8', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  {dispatchStatus.running && <span className="live-pulse"></span>}
-                  {dispatchStatus.running ? 'SENDING LIVE' : 'IDLE / READY'}
-                </div>
-                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.35rem' }}>
-                  {dispatchStatus.current || 'No active background dispatch'}
-                </div>
-              </div>
-            </div>
-
-            {/* Quick Actions & Recent Summary */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1.5rem' }}>
-              <div className="glass-card">
-                <h3 style={{ fontSize: '1.05rem', fontWeight: 700, marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <ShieldCheck size={18} color="#10b981" /> Pre-Flight MX Verification Guarantee
-                </h3>
-                <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '1rem', lineHeight: '1.6' }}>
-                  Every recipient domain is verified against authoritative DNS MX servers before any email is dispatched. This guarantees zero bounced emails and prevents spam scoring.
+            {/* Top Description & Guide Banner */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1.5rem', flexWrap: 'wrap', gap: '1rem' }}>
+              <div>
+                <h1 style={{ fontSize: '1.5rem', fontWeight: 800, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <FileSpreadsheet color="#38bdf8" /> Multi-Tab Sheet Studio &amp; Auto-Reader
+                </h1>
+                <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
+                  Paste any Google Spreadsheet link (View or Edit mode) or drag &amp; drop Excel (.xlsx, .xls, .csv). Each tab is separated into its own table with 1-click one-by-one outreach!
                 </p>
-                <div style={{ display: 'flex', gap: '0.75rem' }}>
-                  <button onClick={runMXVerification} disabled={verifyingMX} className="btn btn-primary" style={{ fontSize: '0.8rem' }}>
-                    <RefreshCw size={14} className={verifyingMX ? 'spin' : ''} /> {verifyingMX ? 'Verifying...' : 'Run MX Verification'}
-                  </button>
-                  <button onClick={() => setActiveTab('recipients')} className="btn btn-outline" style={{ fontSize: '0.8rem' }}>
-                    View Leads ({recipients.length})
-                  </button>
-                </div>
               </div>
 
-              <div className="glass-card">
-                <h3 style={{ fontSize: '1.05rem', fontWeight: 700, marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <KeyRound size={18} color="#38bdf8" /> Dynamic Email Account Switching
-                </h3>
-                <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '1rem', lineHeight: '1.6' }}>
-                  Add multiple Gmail, Google Workspace, Outlook, or Custom SMTP accounts. You can dynamically switch the sender address anytime without editing any code or restarting the server.
-                </p>
-                <button onClick={() => setActiveTab('accounts')} className="btn btn-outline" style={{ fontSize: '0.8rem' }}>
-                  Manage Accounts ({accounts.length}) <ArrowRight size={14} />
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <button onClick={() => setShowHowToShareModal(true)} className="btn btn-outline" style={{ fontSize: '0.8rem' }}>
+                  <HelpCircle size={14} /> How to Share Google Sheet
+                </button>
+                <button onClick={() => setShowAppPasswordGuide(true)} className="btn btn-outline" style={{ fontSize: '0.8rem', borderColor: '#f59e0b', color: '#fbbf24' }}>
+                  <KeyRound size={14} /> App Password Steps
                 </button>
               </div>
             </div>
-          </div>
-        )}
 
-        {/* ============================================================ */}
-        {/* 2. SENDER ACCOUNTS (Dynamic Switcher)                         */}
-        {/* ============================================================ */}
-        {activeTab === 'accounts' && (
-          <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
-              <div>
-                <h1 style={{ fontSize: '1.5rem', fontWeight: 800 }}>Sender Accounts Manager</h1>
-                <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
-                  Switch your sender email account anytime. Configure multiple SMTP/IMAP credentials with live connection testing.
-                </p>
-              </div>
-              <button onClick={() => setShowAddAccount(true)} className="btn btn-primary">
-                <Plus size={16} /> Add New Sender Account
-              </button>
-            </div>
-
-            {/* Account List */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: '1.25rem' }}>
-              {accounts.map(acc => (
-                <div
-                  key={acc.id}
-                  className="glass-card"
-                  style={{
-                    border: acc.is_default ? '2px solid #3b82f6' : '1px solid var(--border-color)',
-                    background: acc.is_default ? 'rgba(30, 41, 67, 0.8)' : 'rgba(26, 34, 52, 0.7)'
-                  }}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
-                    <div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
-                        <span style={{ fontWeight: 700, fontSize: '1.05rem', color: '#fff' }}>{acc.name}</span>
-                        {acc.is_default && <span className="badge badge-blue">Active Sender</span>}
-                      </div>
-                      <p style={{ fontSize: '0.875rem', color: '#38bdf8', fontFamily: 'monospace' }}>{acc.email}</p>
-                    </div>
-                    <button onClick={() => deleteAccount(acc.id)} className="btn btn-danger" style={{ padding: '0.4rem', borderRadius: '6px' }} title="Delete Account">
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-
-                  <div style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', marginBottom: '1.25rem', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
-                    <div>SMTP Host: <strong style={{ color: '#fff' }}>{acc.smtp_host}</strong></div>
-                    <div>Port: <strong style={{ color: '#fff' }}>{acc.smtp_port}</strong></div>
-                    <div>Username: <strong style={{ color: '#fff' }}>{acc.smtp_user}</strong></div>
-                    <div>SSL/TLS: <strong style={{ color: '#fff' }}>{acc.secure ? 'SSL' : 'STARTTLS'}</strong></div>
-                  </div>
-
-                  <div style={{ display: 'flex', gap: '0.75rem' }}>
-                    {!acc.is_default && (
-                      <button onClick={() => setDefaultAccount(acc.id)} className="btn btn-success" style={{ flex: 1, fontSize: '0.8rem' }}>
-                        Set as Active Sender
-                      </button>
-                    )}
+            {/* Input Box: Google Sheet URL & File Upload */}
+            <div className="glass-card" style={{ marginBottom: '1.5rem', background: '#131b2e' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1.25rem', alignItems: 'center' }}>
+                {/* Google Sheet URL Input */}
+                <div>
+                  <label className="input-label" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                    <LinkIcon size={14} color="#38bdf8" /> Google Spreadsheet URL (View or Edit Mode)
+                  </label>
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <input
+                      className="input-field"
+                      placeholder="https://docs.google.com/spreadsheets/d/1vl5moxgRvXo.../edit#gid=0"
+                      value={sheetUrl}
+                      onChange={e => setSheetUrl(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter') loadGoogleSheetUrl(); }}
+                    />
                     <button
-                      onClick={async () => {
-                        alert(`Account verified: ${acc.email} is active and ready to dispatch.`);
-                      }}
-                      className="btn btn-outline"
-                      style={{ fontSize: '0.8rem' }}
+                      onClick={() => loadGoogleSheetUrl()}
+                      disabled={sheetLoading}
+                      className="btn btn-primary"
+                      style={{ whiteSpace: 'nowrap' }}
                     >
-                      <CheckCircle2 size={14} /> Connection OK
+                      <RefreshCw size={15} className={sheetLoading ? 'spin' : ''} />
+                      {sheetLoading ? 'Loading...' : 'Load Tabs'}
                     </button>
                   </div>
                 </div>
-              ))}
+
+                {/* Local File Upload */}
+                <div>
+                  <label className="input-label" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                    <Upload size={14} color="#10b981" /> Or Upload Local Excel / CSV File (.xlsx, .xls, .csv)
+                  </label>
+                  <input
+                    type="file"
+                    ref={fileInputRef}
+                    accept=".xlsx, .xls, .csv"
+                    style={{ display: 'none' }}
+                    onChange={handleFileUpload}
+                  />
+                  <div
+                    onClick={() => fileInputRef.current?.click()}
+                    style={{
+                      border: '2px dashed var(--border-color)',
+                      borderRadius: '8px',
+                      padding: '0.65rem 1rem',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '0.5rem',
+                      cursor: 'pointer',
+                      background: 'rgba(255,255,255,0.02)',
+                      transition: 'border-color 0.2s',
+                      fontSize: '0.85rem',
+                      color: 'var(--text-secondary)'
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.borderColor = '#3b82f6'}
+                    onMouseLeave={e => e.currentTarget.style.borderColor = 'var(--border-color)'}
+                  >
+                    <Upload size={16} color="#38bdf8" />
+                    <span>Click or Drag &amp; Drop Excel file here to parse all tabs</span>
+                  </div>
+                </div>
+              </div>
+
+              {sheetError && (
+                <div style={{ marginTop: '1rem', padding: '0.75rem', borderRadius: '6px', fontSize: '0.8125rem', background: 'rgba(244, 63, 94, 0.15)', color: '#fb7185', border: '1px solid rgba(244, 63, 94, 0.3)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <AlertTriangle size={16} />
+                  <span>{sheetError}</span>
+                  <button onClick={() => setShowHowToShareModal(true)} style={{ background: 'none', border: 'none', color: '#38bdf8', textDecoration: 'underline', cursor: 'pointer', fontSize: '0.8125rem' }}>
+                    View sharing steps
+                  </button>
+                </div>
+              )}
             </div>
 
-            {/* Add Account Modal */}
-            {showAddAccount && (
-              <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, padding: '1rem' }}>
-                <div className="glass-card" style={{ width: '100%', maxWidth: '520px', background: '#131b2e' }}>
+            {/* Multi-Tab Viewer */}
+            {sheetData && sheetData.tabs && sheetData.tabs.length > 0 ? (
+              <div>
+                {/* Sheet Tabs Bar */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.75rem' }}>
+                  <div style={{ display: 'flex', gap: '0.5rem', overflowX: 'auto', paddingBottom: '0.25rem', maxWidth: '100%' }}>
+                    {sheetData.tabs.map((tab, idx) => {
+                      const isActive = activeSheetTabIdx === idx;
+                      return (
+                        <button
+                          key={idx}
+                          onClick={() => setActiveSheetTabIdx(idx)}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '0.5rem',
+                            padding: '0.55rem 1rem',
+                            borderRadius: '8px',
+                            fontSize: '0.85rem',
+                            fontWeight: isActive ? 700 : 500,
+                            cursor: 'pointer',
+                            background: isActive ? 'linear-gradient(135deg, #2563eb, #1d4ed8)' : '#162032',
+                            color: isActive ? '#fff' : 'var(--text-secondary)',
+                            border: isActive ? '1px solid #3b82f6' : '1px solid var(--border-color)',
+                            boxShadow: isActive ? '0 4px 12px rgba(37, 99, 235, 0.35)' : 'none',
+                            whiteSpace: 'nowrap'
+                          }}
+                        >
+                          <FileSpreadsheet size={15} />
+                          <span>{tab.name}</span>
+                          <span style={{ fontSize: '0.7rem', padding: '0.1rem 0.45rem', borderRadius: '12px', background: isActive ? 'rgba(255,255,255,0.25)' : '#0f172a', color: '#fff' }}>
+                            {tab.row_count} rows
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Send Mail & Action Buttons */}
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <button
+                      onClick={() => {
+                        setDispatchScope('current_tab');
+                        setDispatchModalOpen(true);
+                      }}
+                      className="btn btn-success"
+                      style={{ boxShadow: '0 4px 14px rgba(16, 185, 129, 0.4)' }}
+                    >
+                      <Send size={16} /> Send Mail to this Tab ({activeTabObj?.row_count || 0})
+                    </button>
+                    <button
+                      onClick={() => {
+                        setDispatchScope('all_tabs');
+                        setDispatchModalOpen(true);
+                      }}
+                      className="btn btn-primary"
+                    >
+                      <Layers size={16} /> Send to ALL Tabs ({sheetData.tabs.reduce((acc, t) => acc + t.row_count, 0)})
+                    </button>
+                  </div>
+                </div>
+
+                {/* Active Tab Information Bar */}
+                <div className="glass-card" style={{ padding: '0.85rem 1.25rem', marginBottom: '1rem', background: '#101726', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: '0.875rem', fontWeight: 700, color: '#fff' }}>
+                      Tab: {activeTabObj?.name}
+                    </span>
+                    <span style={{ fontSize: '0.775rem', color: 'var(--text-secondary)' }}>
+                      Total Records: <strong style={{ color: '#38bdf8' }}>{activeTabObj?.row_count}</strong>
+                    </span>
+                    <span style={{ fontSize: '0.775rem', color: 'var(--text-secondary)' }}>
+                      Detected Email Column: <strong style={{ color: '#34d399' }}>{activeTabObj?.detected_columns?.email || 'Not Detected'}</strong>
+                    </span>
+                    <span style={{ fontSize: '0.775rem', color: 'var(--text-secondary)' }}>
+                      Detected Name Column: <strong style={{ color: '#fbbf24' }}>{activeTabObj?.detected_columns?.name || 'Not Detected'}</strong>
+                    </span>
+                  </div>
+
+                  {/* Search Filter in Tab */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <Search size={14} color="var(--text-muted)" />
+                    <input
+                      className="input-field"
+                      style={{ padding: '0.35rem 0.65rem', width: '220px', fontSize: '0.8rem' }}
+                      placeholder="Filter tab records..."
+                      value={sheetSearchQuery}
+                      onChange={e => setSheetSearchQuery(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                {/* Table Data View */}
+                <div className="data-table-container" style={{ maxHeight: '550px' }}>
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th style={{ width: '50px' }}>#</th>
+                        {activeTabObj?.headers.map((h, i) => (
+                          <th key={i}>
+                            {h}
+                            {h === activeTabObj.detected_columns?.email && <span className="badge badge-emerald" style={{ marginLeft: '0.3rem', fontSize: '0.65rem' }}>Email</span>}
+                            {h === activeTabObj.detected_columns?.name && <span className="badge badge-amber" style={{ marginLeft: '0.3rem', fontSize: '0.65rem' }}>Name</span>}
+                            {h === activeTabObj.detected_columns?.company && <span className="badge badge-blue" style={{ marginLeft: '0.3rem', fontSize: '0.65rem' }}>Company</span>}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredRows.length > 0 ? (
+                        filteredRows.map((row, rowIdx) => (
+                          <tr key={rowIdx}>
+                            <td style={{ color: 'var(--text-muted)', fontFamily: 'monospace' }}>{rowIdx + 1}</td>
+                            {activeTabObj.headers.map((h, colIdx) => {
+                              const val = row[h] || '';
+                              const isEmail = h === activeTabObj.detected_columns?.email;
+                              return (
+                                <td key={colIdx} style={{ fontFamily: isEmail ? 'monospace' : 'inherit', color: isEmail ? '#38bdf8' : 'inherit' }}>
+                                  {val}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td colSpan={activeTabObj?.headers.length + 1 || 5} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
+                            No matching records found in this tab.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : (
+              <div className="glass-card" style={{ textAlign: 'center', padding: '3.5rem 1.5rem', background: '#0e1422' }}>
+                <FileSpreadsheet size={48} color="#3b82f6" style={{ margin: '0 auto 1rem', opacity: 0.8 }} />
+                <h3 style={{ fontSize: '1.2rem', fontWeight: 700, marginBottom: '0.5rem' }}>No Spreadsheet Loaded Yet</h3>
+                <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', maxWidth: '500px', margin: '0 auto 1.5rem' }}>
+                  Paste a Google Spreadsheet link above or upload an Excel file to view all tabs and dispatch cold outreach directly.
+                </p>
+                <div style={{ display: 'flex', justifyContent: 'center', gap: '0.75rem' }}>
+                  <button onClick={() => loadGoogleSheetUrl()} className="btn btn-primary">
+                    Load Demo Google Sheet
+                  </button>
+                  <button onClick={() => fileInputRef.current?.click()} className="btn btn-outline">
+                    <Upload size={14} /> Upload .xlsx File
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* SEND OUTREACH MODAL */}
+            {dispatchModalOpen && (
+              <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(5px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 60, padding: '1rem' }}>
+                <div className="glass-card" style={{ width: '100%', maxWidth: '560px', background: '#121a2d', border: '1px solid #3b82f6' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
-                    <h2 style={{ fontSize: '1.25rem', fontWeight: 700 }}>Connect New Sender Account</h2>
-                    <button onClick={() => setShowAddAccount(false)} className="btn btn-outline" style={{ padding: '0.35rem' }}>
+                    <h2 style={{ fontSize: '1.25rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      <Send size={18} color="#10b981" /> One-by-One Cold Outreach Dispatch
+                    </h2>
+                    <button onClick={() => setDispatchModalOpen(false)} className="btn btn-outline" style={{ padding: '0.35rem' }}>
                       <XCircle size={18} />
                     </button>
                   </div>
 
-                  <form onSubmit={handleSaveAccount}>
-                    <div className="input-group">
-                      <label className="input-label">Display Name</label>
-                      <input
-                        className="input-field"
-                        placeholder="e.g. Outreach Team / Marketing Lead"
-                        value={accountForm.name}
-                        onChange={e => setAccountForm({ ...accountForm, name: e.target.value })}
-                        required
-                      />
+                  <div style={{ background: '#0a0f1b', padding: '0.85rem', borderRadius: '8px', border: '1px solid var(--border-color)', marginBottom: '1.25rem', fontSize: '0.85rem' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.35rem' }}>
+                      <span style={{ color: 'var(--text-secondary)' }}>Target Scope:</span>
+                      <strong style={{ color: '#fff' }}>
+                        {dispatchScope === 'current_tab' ? `Current Tab: ${activeTabObj?.name}` : 'All Tabs in Workbook'}
+                      </strong>
                     </div>
-
-                    <div className="input-group">
-                      <label className="input-label">Sender Email Address</label>
-                      <input
-                        type="email"
-                        className="input-field"
-                        placeholder="e.g. outreach@yourdomain.com or user@gmail.com"
-                        value={accountForm.email}
-                        onChange={e => setAccountForm({ ...accountForm, email: e.target.value, smtp_user: e.target.value })}
-                        required
-                      />
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.35rem' }}>
+                      <span style={{ color: 'var(--text-secondary)' }}>Recipients Count:</span>
+                      <strong style={{ color: '#34d399' }}>
+                        {dispatchScope === 'current_tab' ? activeTabObj?.row_count : sheetData.tabs.reduce((a, b) => a + b.row_count, 0)} leads
+                      </strong>
                     </div>
-
-                    <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '0.75rem' }}>
-                      <div className="input-group">
-                        <label className="input-label">SMTP Host</label>
-                        <input
-                          className="input-field"
-                          placeholder="smtp.gmail.com"
-                          value={accountForm.smtp_host}
-                          onChange={e => setAccountForm({ ...accountForm, smtp_host: e.target.value })}
-                          required
-                        />
-                      </div>
-                      <div className="input-group">
-                        <label className="input-label">Port</label>
-                        <input
-                          type="number"
-                          className="input-field"
-                          placeholder="587"
-                          value={accountForm.smtp_port}
-                          onChange={e => setAccountForm({ ...accountForm, smtp_port: e.target.value })}
-                          required
-                        />
-                      </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ color: 'var(--text-secondary)' }}>Zero-Bounce Verification:</span>
+                      <span className="badge badge-emerald"><CheckCircle2 size={12} /> Live DNS MX Check Active</span>
                     </div>
+                  </div>
 
-                    <div className="input-group">
-                      <label className="input-label">SMTP App Password / Token</label>
-                      <input
-                        type="password"
-                        className="input-field"
-                        placeholder="App password or secret key"
-                        value={accountForm.smtp_pass}
-                        onChange={e => setAccountForm({ ...accountForm, smtp_pass: e.target.value })}
-                        required
-                      />
-                      <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-                        For Gmail, use a 16-character Google App Password (My Account &gt; Security &gt; 2-Step &gt; App Passwords).
-                      </p>
-                    </div>
+                  <div className="input-group">
+                    <label className="input-label">Select Sender Account</label>
+                    <select
+                      className="input-field"
+                      value={dispatchConfig.account_id}
+                      onChange={e => setDispatchConfig({ ...dispatchConfig, account_id: e.target.value })}
+                    >
+                      {accounts.map(a => (
+                        <option key={a.id} value={a.id}>
+                          {a.name} ({a.email}) {a.is_default ? '★ Active Sender' : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
 
-                    {accountTestResult && (
-                      <div style={{ marginBottom: '1rem', padding: '0.75rem', borderRadius: '6px', fontSize: '0.8125rem', background: accountTestResult.success ? 'rgba(16, 185, 129, 0.15)' : 'rgba(244, 63, 94, 0.15)', color: accountTestResult.success ? '#34d399' : '#fb7185', border: `1px solid ${accountTestResult.success ? 'rgba(16, 185, 129, 0.3)' : 'rgba(244, 63, 94, 0.3)'}` }}>
-                        {accountTestResult.success ? (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                            <CheckCircle2 size={16} /> {accountTestResult.message}
-                          </div>
-                        ) : (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                            <AlertTriangle size={16} /> {accountTestResult.error}
-                          </div>
-                        )}
-                      </div>
-                    )}
+                  <div className="input-group">
+                    <label className="input-label">Select Email Template</label>
+                    <select
+                      className="input-field"
+                      value={dispatchConfig.template_id}
+                      onChange={e => setDispatchConfig({ ...dispatchConfig, template_id: e.target.value })}
+                    >
+                      {templates.map(t => (
+                        <option key={t.id} value={t.id}>{t.name} ({t.category})</option>
+                      ))}
+                    </select>
+                  </div>
 
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1.25rem' }}>
-                      <button type="button" onClick={handleTestAccount} disabled={accountTestLoading} className="btn btn-outline" style={{ fontSize: '0.8rem' }}>
-                        <RefreshCw size={14} className={accountTestLoading ? 'spin' : ''} /> {accountTestLoading ? 'Testing...' : 'Test Connection'}
-                      </button>
-                      <div style={{ display: 'flex', gap: '0.5rem' }}>
-                        <button type="button" onClick={() => setShowAddAccount(false)} className="btn btn-outline">Cancel</button>
-                        <button type="submit" className="btn btn-primary">Save & Connect</button>
-                      </div>
-                    </div>
-                  </form>
+                  <div className="input-group">
+                    <label className="input-label">Delay Between Sends: {dispatchConfig.delay_seconds} seconds</label>
+                    <input
+                      type="range"
+                      min="2"
+                      max="15"
+                      step="1"
+                      className="input-field"
+                      value={dispatchConfig.delay_seconds}
+                      onChange={e => setDispatchConfig({ ...dispatchConfig, delay_seconds: e.target.value })}
+                    />
+                    <p style={{ fontSize: '0.725rem', color: 'var(--text-muted)' }}>
+                      Sends emails one-by-one with human-like throttling to protect your account reputation.
+                    </p>
+                  </div>
+
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', marginTop: '1.5rem' }}>
+                    <button onClick={() => setDispatchModalOpen(false)} className="btn btn-outline">Cancel</button>
+                    <button onClick={launchDispatchForSheet} className="btn btn-success" style={{ padding: '0.65rem 1.5rem' }}>
+                      <Play size={16} /> Start One-by-One Dispatch
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -673,7 +888,256 @@ export default function App() {
         )}
 
         {/* ============================================================ */}
-        {/* 3. TEMPLATES STUDIO (Open Source Universal Templates)        */}
+        {/* 2. DASHBOARD & FINAL DELIVERY REPORT                         */}
+        {/* ============================================================ */}
+        {activeTab === 'dashboard' && (
+          <div>
+            <div style={{ marginBottom: '1.5rem' }}>
+              <h1 style={{ fontSize: '1.5rem', fontWeight: 800 }}>Delivery Analytics &amp; Campaign Report</h1>
+              <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
+                Complete breakdown of sent, delivered, bounced, and skipped emails across all campaigns.
+              </p>
+            </div>
+
+            {/* 4 Core Stat Cards: Sent, Delivered, Bounced, Skipped */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1.25rem', marginBottom: '2rem' }}>
+              <div className="glass-card">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                  <span style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>TOTAL DELIVERED</span>
+                  <div style={{ background: 'rgba(16, 185, 129, 0.15)', padding: '0.4rem', borderRadius: '8px', color: '#10b981' }}>
+                    <CheckCircle2 size={20} />
+                  </div>
+                </div>
+                <div style={{ fontSize: '2.2rem', fontWeight: 800, color: '#34d399' }}>
+                  {stats.delivered_count || stats.dispatched_count}
+                </div>
+                <div style={{ fontSize: '0.75rem', color: '#34d399', marginTop: '0.35rem' }}>
+                  Accepted by destination mail servers
+                </div>
+              </div>
+
+              <div className="glass-card">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                  <span style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>BOUNCED EMAILS</span>
+                  <div style={{ background: 'rgba(244, 63, 94, 0.15)', padding: '0.4rem', borderRadius: '8px', color: '#f43f5e' }}>
+                    <XCircle size={20} />
+                  </div>
+                </div>
+                <div style={{ fontSize: '2.2rem', fontWeight: 800, color: '#fb7185' }}>
+                  {stats.bounced_count || 0}
+                </div>
+                <div style={{ fontSize: '0.75rem', color: stats.bounced_count === 0 ? '#34d399' : '#fb7185', marginTop: '0.35rem' }}>
+                  {stats.bounced_count === 0 ? '0% Bounce Rate (Protected)' : 'Failed delivery'}
+                </div>
+              </div>
+
+              <div className="glass-card">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                  <span style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>SKIPPED / PROTECTED</span>
+                  <div style={{ background: 'rgba(245, 158, 11, 0.15)', padding: '0.4rem', borderRadius: '8px', color: '#f59e0b' }}>
+                    <ShieldCheck size={20} />
+                  </div>
+                </div>
+                <div style={{ fontSize: '2.2rem', fontWeight: 800, color: '#fbbf24' }}>
+                  {stats.skipped_count || 0}
+                </div>
+                <div style={{ fontSize: '0.75rem', color: '#fbbf24', marginTop: '0.35rem' }}>
+                  Skipped due to dead MX or duplicates
+                </div>
+              </div>
+
+              <div className="glass-card">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                  <span style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>ACTIVE SENDER MAIL</span>
+                  <div style={{ background: 'rgba(59, 130, 246, 0.15)', padding: '0.4rem', borderRadius: '8px', color: '#3b82f6' }}>
+                    <Mail size={20} />
+                  </div>
+                </div>
+                <div style={{ fontSize: '1.1rem', fontWeight: 700, color: '#f8fafc', wordBreak: 'break-all' }}>
+                  {stats.default_sender}
+                </div>
+                <div style={{ fontSize: '0.75rem', color: '#38bdf8', marginTop: '0.35rem' }}>
+                  Change anytime via Sender Accounts
+                </div>
+              </div>
+            </div>
+
+            {/* Final Dispatch Summary Report Card (if recent campaign executed) */}
+            {dispatchSummaryReport && (
+              <div className="glass-card" style={{ marginBottom: '2rem', border: '1px solid #10b981', background: 'rgba(16, 185, 129, 0.05)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                  <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#34d399', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <CheckCircle2 size={20} /> Latest Campaign Completion Summary
+                  </h3>
+                  <span className="badge badge-emerald">Dispatched Successfully</span>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '1rem', textAlign: 'center' }}>
+                  <div style={{ background: '#0e1524', padding: '1rem', borderRadius: '8px' }}>
+                    <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>TOTAL PROCESSED</span>
+                    <p style={{ fontSize: '1.5rem', fontWeight: 800, color: '#fff' }}>{dispatchSummaryReport.total}</p>
+                  </div>
+                  <div style={{ background: '#0e1524', padding: '1rem', borderRadius: '8px' }}>
+                    <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>SENT / DELIVERED</span>
+                    <p style={{ fontSize: '1.5rem', fontWeight: 800, color: '#34d399' }}>{dispatchSummaryReport.delivered}</p>
+                  </div>
+                  <div style={{ background: '#0e1524', padding: '1rem', borderRadius: '8px' }}>
+                    <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>SKIPPED</span>
+                    <p style={{ fontSize: '1.5rem', fontWeight: 800, color: '#fbbf24' }}>{dispatchSummaryReport.skipped}</p>
+                  </div>
+                  <div style={{ background: '#0e1524', padding: '1rem', borderRadius: '8px' }}>
+                    <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>BOUNCED</span>
+                    <p style={{ fontSize: '1.5rem', fontWeight: 800, color: '#fb7185' }}>{dispatchSummaryReport.bounced}</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Quick Action Navigation */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1.5rem' }}>
+              <div className="glass-card">
+                <h3 style={{ fontSize: '1.05rem', fontWeight: 700, marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <FileSpreadsheet size={18} color="#38bdf8" /> Open Multi-Tab Sheet Studio
+                </h3>
+                <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
+                  Load any Google Sheet or local Excel file. All tabs appear on screen in tables ready for instant sending.
+                </p>
+                <button onClick={() => setActiveTab('sheet_studio')} className="btn btn-primary" style={{ fontSize: '0.85rem' }}>
+                  Launch Sheet Studio <ArrowRight size={14} />
+                </button>
+              </div>
+
+              <div className="glass-card">
+                <h3 style={{ fontSize: '1.05rem', fontWeight: 700, marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <Send size={18} color="#10b981" /> Real-Time Dispatch Terminal
+                </h3>
+                <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
+                  Watch one-by-one sending live with human-like delays, delivery logs, and connection retry monitors.
+                </p>
+                <button onClick={() => setActiveTab('dispatch')} className="btn btn-outline" style={{ fontSize: '0.85rem' }}>
+                  Open Dispatch Console <ArrowRight size={14} />
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ============================================================ */}
+        {/* 3. LIVE DISPATCH CONSOLE                                     */}
+        {/* ============================================================ */}
+        {activeTab === 'dispatch' && (
+          <div>
+            <div style={{ marginBottom: '1.5rem' }}>
+              <h1 style={{ fontSize: '1.5rem', fontWeight: 800 }}>Live Dispatch Console</h1>
+              <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
+                Emails are dispatched one-by-one with configurable delays and automatic reconnection resilience.
+              </p>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1.5rem', marginBottom: '1.5rem' }}>
+              {/* Progress Summary Card */}
+              <div className="glass-card">
+                <h3 style={{ fontSize: '1.05rem', fontWeight: 700, marginBottom: '1rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span>Sending Progress (One-by-One)</span>
+                  {dispatchStatus.running && <span className="badge badge-emerald">Active Sending</span>}
+                </h3>
+
+                <div style={{ marginBottom: '1.25rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8125rem', marginBottom: '0.35rem' }}>
+                    <span>Processed:</span>
+                    <span>{dispatchStatus.sent} / {dispatchStatus.total || 0} ({dispatchStatus.total ? Math.round((dispatchStatus.sent / dispatchStatus.total) * 100) : 0}%)</span>
+                  </div>
+                  <div style={{ width: '100%', height: '10px', background: '#0e1422', borderRadius: '5px', overflow: 'hidden' }}>
+                    <div
+                      style={{
+                        height: '100%',
+                        background: 'linear-gradient(90deg, #3b82f6, #10b981)',
+                        width: `${dispatchStatus.total ? (dispatchStatus.sent / dispatchStatus.total) * 100 : 0}%`,
+                        transition: 'width 0.3s ease'
+                      }}
+                    />
+                  </div>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.5rem', textAlign: 'center' }}>
+                  <div style={{ background: '#111827', padding: '0.75rem 0.5rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                    <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>DELIVERED</span>
+                    <p style={{ fontSize: '1.25rem', fontWeight: 800, color: '#34d399' }}>{dispatchStatus.delivered || dispatchStatus.sent}</p>
+                  </div>
+                  <div style={{ background: '#111827', padding: '0.75rem 0.5rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                    <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>SKIPPED</span>
+                    <p style={{ fontSize: '1.25rem', fontWeight: 800, color: '#fbbf24' }}>{dispatchStatus.skipped}</p>
+                  </div>
+                  <div style={{ background: '#111827', padding: '0.75rem 0.5rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                    <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>BOUNCED</span>
+                    <p style={{ fontSize: '1.25rem', fontWeight: 800, color: '#fb7185' }}>{dispatchStatus.bounced || 0}</p>
+                  </div>
+                  <div style={{ background: '#111827', padding: '0.75rem 0.5rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                    <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>FAILED</span>
+                    <p style={{ fontSize: '1.25rem', fontWeight: 800, color: '#f43f5e' }}>{dispatchStatus.failed}</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Status Details Card */}
+              <div className="glass-card">
+                <h3 style={{ fontSize: '1.05rem', fontWeight: 700, marginBottom: '1rem' }}>Active Session Details</h3>
+                <div style={{ fontSize: '0.85rem', display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
+                  <div><strong>Current Task:</strong> <span style={{ color: '#38bdf8' }}>{dispatchStatus.current || 'Idle'}</span></div>
+                  <div><strong>Sender:</strong> <span style={{ fontFamily: 'monospace' }}>{accounts.find(a => a.id === dispatchConfig.account_id)?.email || accounts.find(a => a.is_default)?.email}</span></div>
+                  <div><strong>Delay Throttle:</strong> {dispatchConfig.delay_seconds} seconds per recipient</div>
+                  <div style={{ marginTop: '0.5rem' }}>
+                    {dispatchStatus.running ? (
+                      <button onClick={async () => { await fetch(`${API_BASE}/dispatch/stop`, { method: 'POST' }); }} className="btn btn-danger" style={{ width: '100%' }}>
+                        <Square size={16} /> Stop Active Dispatch
+                      </button>
+                    ) : (
+                      <button onClick={() => setActiveTab('sheet_studio')} className="btn btn-primary" style={{ width: '100%' }}>
+                        <FileSpreadsheet size={16} /> Choose Tab to Send From Sheet Studio
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Terminal Console Logs */}
+            <div className="glass-card" style={{ background: '#0a0e17' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                <span style={{ fontSize: '0.8125rem', fontWeight: 600, color: 'var(--text-secondary)', fontFamily: 'monospace' }}>
+                  ONE-BY-ONE DISPATCH LIVE LOGS
+                </span>
+                <span style={{ fontSize: '0.725rem', color: 'var(--text-muted)' }}>Real-time streaming</span>
+              </div>
+              <div
+                style={{
+                  height: '280px',
+                  overflowY: 'auto',
+                  background: '#060911',
+                  borderRadius: '6px',
+                  padding: '0.85rem',
+                  fontFamily: 'monospace',
+                  fontSize: '0.78rem',
+                  border: '1px solid #1a2333',
+                  lineHeight: '1.6'
+                }}
+              >
+                {dispatchStatus.logs.length === 0 ? (
+                  <p style={{ color: 'var(--text-muted)' }}>[READY] No dispatch session running. Select a tab in Sheet Studio and click "Send Mail" to start.</p>
+                ) : (
+                  dispatchStatus.logs.map((log, idx) => (
+                    <div key={idx} style={{ color: log.status === 'sent' ? '#34d399' : log.status === 'failed' ? '#fb7185' : '#fbbf24' }}>
+                      [{log.timestamp || new Date().toLocaleTimeString()}] [{log.status.toUpperCase()}] -&gt; {log.email} ({log.company || 'Enterprise'})
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ============================================================ */}
+        {/* 4. TEMPLATES STUDIO                                          */}
         {/* ============================================================ */}
         {activeTab === 'templates' && (
           <div>
@@ -681,7 +1145,7 @@ export default function App() {
               <div>
                 <h1 style={{ fontSize: '1.5rem', fontWeight: 800 }}>Templates Studio</h1>
                 <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
-                  Create or edit any email template. Dynamic variable chips automatically replace recipient details.
+                  Universal template engine: Use any template for any outreach, with full variable replacement.
                 </p>
               </div>
               <button
@@ -708,14 +1172,15 @@ export default function App() {
                     padding: '0.55rem 1rem',
                     borderRadius: '8px',
                     fontSize: '0.825rem',
-                    fontWeight: selectedTemplate?.id === t.id ? 600 : 400,
+                    fontWeight: selectedTemplate?.id === t.id ? 700 : 400,
                     background: selectedTemplate?.id === t.id ? 'rgba(59, 130, 246, 0.2)' : 'rgba(26, 34, 52, 0.7)',
                     border: selectedTemplate?.id === t.id ? '1px solid #3b82f6' : '1px solid var(--border-color)',
                     color: selectedTemplate?.id === t.id ? '#60a5fa' : 'var(--text-primary)',
                     cursor: 'pointer',
                     display: 'flex',
                     alignItems: 'center',
-                    gap: '0.5rem'
+                    gap: '0.5rem',
+                    whiteSpace: 'nowrap'
                   }}
                 >
                   <FileText size={14} />
@@ -745,7 +1210,7 @@ export default function App() {
                 </div>
 
                 <div className="input-group">
-                  <label className="input-label">Subject Line (Supports variables)</label>
+                  <label className="input-label">Subject Line</label>
                   <input
                     className="input-field"
                     value={templateForm.subject}
@@ -772,10 +1237,10 @@ export default function App() {
                 </div>
 
                 <div className="input-group">
-                  <label className="input-label">HTML Content (100% Left-Aligned Format)</label>
+                  <label className="input-label">HTML Content (100% Left-Aligned Standard)</label>
                   <textarea
                     className="input-field"
-                    rows={14}
+                    rows={12}
                     style={{ fontFamily: 'monospace', fontSize: '0.8rem', lineHeight: '1.4' }}
                     value={templateForm.html_content}
                     onChange={e => setTemplateForm({ ...templateForm, html_content: e.target.value })}
@@ -816,264 +1281,327 @@ export default function App() {
         )}
 
         {/* ============================================================ */}
-        {/* 4. RECIPIENTS & LEADS (Any To-Address)                       */}
+        {/* 5. SENDER ACCOUNTS (Switcher)                                */}
         {/* ============================================================ */}
-        {activeTab === 'recipients' && (
+        {activeTab === 'accounts' && (
           <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', flexWrap: 'wrap', gap: '1rem' }}>
               <div>
-                <h1 style={{ fontSize: '1.5rem', fontWeight: 800 }}>Recipients & Leads Manager</h1>
+                <h1 style={{ fontSize: '1.5rem', fontWeight: 800 }}>Sender Accounts Manager</h1>
                 <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
-                  Import any recipient list. 1-Click DNS MX Verification ensures zero bounces before sending.
+                  Switch your sender email account anytime. Configure multiple accounts with live connection testing.
                 </p>
               </div>
-              <div style={{ display: 'flex', gap: '0.75rem' }}>
-                <button onClick={runMXVerification} disabled={verifyingMX} className="btn btn-outline">
-                  <RefreshCw size={15} className={verifyingMX ? 'spin' : ''} /> {verifyingMX ? 'Verifying...' : 'Verify DNS MX'}
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <button onClick={() => setShowAppPasswordGuide(true)} className="btn btn-outline" style={{ borderColor: '#f59e0b', color: '#fbbf24' }}>
+                  <KeyRound size={15} /> App Password Guide
                 </button>
-                <button onClick={() => setShowAddRecipient(true)} className="btn btn-primary">
-                  <Plus size={15} /> Import Leads
+                <button onClick={() => setShowAddAccount(true)} className="btn btn-primary">
+                  <Plus size={16} /> Add New Sender Account
                 </button>
               </div>
             </div>
 
-            {/* Recipient Table */}
-            <div className="data-table-container">
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>#</th>
-                    <th>Email Address (To)</th>
-                    <th>Contact Person</th>
-                    <th>Company / Agency</th>
-                    <th>City / Region</th>
-                    <th>MX Verification</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {recipients.map((r, i) => (
-                    <tr key={r.id || i}>
-                      <td style={{ color: 'var(--text-muted)' }}>{i + 1}</td>
-                      <td>
-                        <strong style={{ color: '#fff', fontFamily: 'monospace' }}>{r.email}</strong>
-                      </td>
-                      <td>{r.name}</td>
-                      <td>{r.company}</td>
-                      <td>{r.city}</td>
-                      <td>
-                        {r.mx_status === 'verified' ? (
-                          <span className="badge badge-emerald"><CheckCircle2 size={12} /> MX Verified</span>
-                        ) : r.mx_status === 'dead_domain' ? (
-                          <span className="badge badge-rose"><XCircle size={12} /> Dead Domain</span>
-                        ) : (
-                          <span className="badge badge-amber"><RefreshCw size={12} /> Unverified</span>
-                        )}
-                      </td>
-                      <td>
-                        <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                          {r.status || 'Ready'}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            {/* Account List */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: '1.25rem' }}>
+              {accounts.map(acc => (
+                <div
+                  key={acc.id}
+                  className="glass-card"
+                  style={{
+                    border: acc.is_default ? '2px solid #3b82f6' : '1px solid var(--border-color)',
+                    background: acc.is_default ? 'rgba(30, 41, 67, 0.8)' : 'rgba(26, 34, 52, 0.7)'
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
+                        <span style={{ fontWeight: 700, fontSize: '1.05rem', color: '#fff' }}>{acc.name}</span>
+                        {acc.is_default && <span className="badge badge-blue">Active Sender</span>}
+                      </div>
+                      <p style={{ fontSize: '0.875rem', color: '#38bdf8', fontFamily: 'monospace' }}>{acc.email}</p>
+                    </div>
+                    <button onClick={async () => {
+                      if (window.confirm("Remove this account?")) {
+                        await fetch(`${API_BASE}/accounts/${acc.id}`, { method: 'DELETE' });
+                        fetchData();
+                      }
+                    }} className="btn btn-danger" style={{ padding: '0.4rem', borderRadius: '6px' }} title="Delete">
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+
+                  <div style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', marginBottom: '1.25rem', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
+                    <div>Host: <strong style={{ color: '#fff' }}>{acc.smtp_host}</strong></div>
+                    <div>Port: <strong style={{ color: '#fff' }}>{acc.smtp_port}</strong></div>
+                    <div>User: <strong style={{ color: '#fff' }}>{acc.smtp_user}</strong></div>
+                    <div>Security: <strong style={{ color: '#fff' }}>{acc.secure ? 'SSL' : 'STARTTLS'}</strong></div>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '0.75rem' }}>
+                    {!acc.is_default && (
+                      <button onClick={() => setDefaultAccount(acc.id)} className="btn btn-success" style={{ flex: 1, fontSize: '0.8rem' }}>
+                        Set as Active Sender
+                      </button>
+                    )}
+                    <button className="btn btn-outline" style={{ fontSize: '0.8rem' }}>
+                      <CheckCircle2 size={14} /> Connected
+                    </button>
+                  </div>
+                </div>
+              ))}
             </div>
 
-            {/* Add Recipients Modal */}
-            {showAddRecipient && (
-              <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, padding: '1rem' }}>
-                <div className="glass-card" style={{ width: '100%', maxWidth: '580px', background: '#131b2e' }}>
+            {/* Add Account Modal */}
+            {showAddAccount && (
+              <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 60, padding: '1rem' }}>
+                <div className="glass-card" style={{ width: '100%', maxWidth: '520px', background: '#131b2e' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
-                    <h2 style={{ fontSize: '1.25rem', fontWeight: 700 }}>Import Recipients (Any To-Address)</h2>
-                    <button onClick={() => setShowAddRecipient(false)} className="btn btn-outline" style={{ padding: '0.35rem' }}>
+                    <h2 style={{ fontSize: '1.25rem', fontWeight: 700 }}>Connect New Sender Account</h2>
+                    <button onClick={() => setShowAddAccount(false)} className="btn btn-outline" style={{ padding: '0.35rem' }}>
                       <XCircle size={18} />
                     </button>
                   </div>
 
-                  <p style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
-                    Paste recipient entries (1 per line). Format: <code>email, name, company, city</code>
-                  </p>
+                  <form onSubmit={handleSaveAccount}>
+                    <div className="input-group">
+                      <label className="input-label">Display Name</label>
+                      <input
+                        className="input-field"
+                        placeholder="e.g. Marketing Lead / Outreach Specialist"
+                        value={accountForm.name}
+                        onChange={e => setAccountForm({ ...accountForm, name: e.target.value })}
+                        required
+                      />
+                    </div>
 
-                  <textarea
-                    className="input-field"
-                    rows={8}
-                    placeholder="contact@agency.com, Rajesh, Digital Agency, Chennai&#10;sales@company.in, Priya, Web Studio, Coimbatore"
-                    value={manualRecipientsText}
-                    onChange={e => setManualRecipientsText(e.target.value)}
-                  />
+                    <div className="input-group">
+                      <label className="input-label">Sender Email Address</label>
+                      <input
+                        type="email"
+                        className="input-field"
+                        placeholder="user@gmail.com or contact@domain.com"
+                        value={accountForm.email}
+                        onChange={e => setAccountForm({ ...accountForm, email: e.target.value, smtp_user: e.target.value })}
+                        required
+                      />
+                    </div>
 
-                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', marginTop: '1.25rem' }}>
-                    <button onClick={() => setShowAddRecipient(false)} className="btn btn-outline">Cancel</button>
-                    <button onClick={handleAddRecipientsBulk} className="btn btn-primary">Import & Save</button>
-                  </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '0.75rem' }}>
+                      <div className="input-group">
+                        <label className="input-label">SMTP Host</label>
+                        <input
+                          className="input-field"
+                          placeholder="smtp.gmail.com"
+                          value={accountForm.smtp_host}
+                          onChange={e => setAccountForm({ ...accountForm, smtp_host: e.target.value })}
+                          required
+                        />
+                      </div>
+                      <div className="input-group">
+                        <label className="input-label">Port</label>
+                        <input
+                          type="number"
+                          className="input-field"
+                          placeholder="587"
+                          value={accountForm.smtp_port}
+                          onChange={e => setAccountForm({ ...accountForm, smtp_port: e.target.value })}
+                          required
+                        />
+                      </div>
+                    </div>
+
+                    <div className="input-group">
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.35rem' }}>
+                        <label className="input-label" style={{ margin: 0 }}>SMTP App Password / Secret</label>
+                        <button
+                          type="button"
+                          onClick={() => setShowAppPasswordGuide(true)}
+                          style={{ background: 'none', border: 'none', color: '#fbbf24', fontSize: '0.75rem', textDecoration: 'underline', cursor: 'pointer' }}
+                        >
+                          Need help getting App Password?
+                        </button>
+                      </div>
+                      <input
+                        type="password"
+                        className="input-field"
+                        placeholder="16-character Google App Password"
+                        value={accountForm.smtp_pass}
+                        onChange={e => setAccountForm({ ...accountForm, smtp_pass: e.target.value })}
+                        required
+                      />
+                    </div>
+
+                    {accountTestResult && (
+                      <div style={{ marginBottom: '1rem', padding: '0.75rem', borderRadius: '6px', fontSize: '0.8125rem', background: accountTestResult.success ? 'rgba(16, 185, 129, 0.15)' : 'rgba(244, 63, 94, 0.15)', color: accountTestResult.success ? '#34d399' : '#fb7185', border: `1px solid ${accountTestResult.success ? 'rgba(16, 185, 129, 0.3)' : 'rgba(244, 63, 94, 0.3)'}` }}>
+                        {accountTestResult.success ? (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <CheckCircle2 size={16} /> {accountTestResult.message}
+                          </div>
+                        ) : (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <AlertTriangle size={16} /> {accountTestResult.error}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1.25rem' }}>
+                      <button type="button" onClick={handleTestAccount} disabled={accountTestLoading} className="btn btn-outline" style={{ fontSize: '0.8rem' }}>
+                        <RefreshCw size={14} className={accountTestLoading ? 'spin' : ''} /> {accountTestLoading ? 'Testing...' : 'Test Connection'}
+                      </button>
+                      <div style={{ display: 'flex', gap: '0.5rem' }}>
+                        <button type="button" onClick={() => setShowAddAccount(false)} className="btn btn-outline">Cancel</button>
+                        <button type="submit" className="btn btn-primary">Save &amp; Connect</button>
+                      </div>
+                    </div>
+                  </form>
                 </div>
               </div>
             )}
           </div>
         )}
+      </main>
 
-        {/* ============================================================ */}
-        {/* 5. LIVE DISPATCH CONSOLE                                     */}
-        {/* ============================================================ */}
-        {activeTab === 'dispatch' && (
-          <div>
-            <div style={{ marginBottom: '1.5rem' }}>
-              <h1 style={{ fontSize: '1.5rem', fontWeight: 800 }}>Live Dispatch Console</h1>
-              <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
-                Execute high-deliverability outreach with auto-reconnect, custom throttle delay, and live terminal monitoring.
-              </p>
+      {/* ============================================================ */}
+      {/* HOW TO GET GMAIL APP PASSWORD GUIDE MODAL                    */}
+      {/* ============================================================ */}
+      {showAppPasswordGuide && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(5px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 70, padding: '1.5rem' }}>
+          <div className="glass-card" style={{ width: '100%', maxWidth: '640px', background: '#121829', border: '1px solid #f59e0b' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
+              <h2 style={{ fontSize: '1.25rem', fontWeight: 800, color: '#fbbf24', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <KeyRound size={20} /> How to Generate Gmail / Workspace App Password
+              </h2>
+              <button onClick={() => setShowAppPasswordGuide(false)} className="btn btn-outline" style={{ padding: '0.35rem' }}>
+                <XCircle size={18} />
+              </button>
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1.5rem', marginBottom: '1.5rem' }}>
-              {/* Configuration Card */}
-              <div className="glass-card">
-                <h3 style={{ fontSize: '1.05rem', fontWeight: 700, marginBottom: '1.25rem' }}>Campaign Launch Settings</h3>
+            <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '1.25rem', lineHeight: '1.6' }}>
+              Google requires a 16-character App Password to send emails via SMTP securely without exposing your main Google Account password.
+            </p>
 
-                <div className="input-group">
-                  <label className="input-label">Sender Account</label>
-                  <select
-                    className="input-field"
-                    value={dispatchConfig.account_id}
-                    onChange={e => setDispatchConfig({ ...dispatchConfig, account_id: e.target.value })}
-                  >
-                    {accounts.map(a => (
-                      <option key={a.id} value={a.id}>
-                        {a.name} ({a.email}) {a.is_default ? '★ Active' : ''}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="input-group">
-                  <label className="input-label">Outreach Template</label>
-                  <select
-                    className="input-field"
-                    value={dispatchConfig.template_id}
-                    onChange={e => setDispatchConfig({ ...dispatchConfig, template_id: e.target.value })}
-                  >
-                    {templates.map(t => (
-                      <option key={t.id} value={t.id}>{t.name} ({t.category})</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="input-group">
-                  <label className="input-label">Delay Between Sends: {dispatchConfig.delay_seconds} seconds</label>
-                  <input
-                    type="range"
-                    min="1"
-                    max="15"
-                    step="1"
-                    className="input-field"
-                    value={dispatchConfig.delay_seconds}
-                    onChange={e => setDispatchConfig({ ...dispatchConfig, delay_seconds: e.target.value })}
-                  />
-                  <p style={{ fontSize: '0.725rem', color: 'var(--text-muted)' }}>
-                    Recommended 5-6s for Gmail to avoid rate limits and simulate human sending.
-                  </p>
-                </div>
-
-                <div style={{ marginTop: '1.5rem', display: 'flex', gap: '0.75rem' }}>
-                  {!dispatchStatus.running ? (
-                    <button onClick={handleStartDispatch} className="btn btn-primary" style={{ flex: 1 }}>
-                      <Play size={16} /> Launch Dispatch
-                    </button>
-                  ) : (
-                    <button onClick={handleStopDispatch} className="btn btn-danger" style={{ flex: 1 }}>
-                      <Square size={16} /> Stop Dispatch
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {/* Progress Summary Card */}
-              <div className="glass-card">
-                <h3 style={{ fontSize: '1.05rem', fontWeight: 700, marginBottom: '1.25rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <span>Dispatch Execution Status</span>
-                  {dispatchStatus.running && <span className="badge badge-emerald">Live Sending</span>}
-                </h3>
-
-                <div style={{ marginBottom: '1.25rem' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8125rem', marginBottom: '0.35rem' }}>
-                    <span>Progress:</span>
-                    <span>{dispatchStatus.sent} / {dispatchStatus.total || recipients.length} ({dispatchStatus.total ? Math.round((dispatchStatus.sent / dispatchStatus.total) * 100) : 0}%)</span>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '1.5rem' }}>
+              {[
+                {
+                  step: 1,
+                  title: "Turn ON 2-Step Verification",
+                  desc: "Go to your Google Account > Security. Make sure '2-Step Verification' is turned ON (required by Google to enable App Passwords)."
+                },
+                {
+                  step: 2,
+                  title: "Open App Passwords Page",
+                  desc: "Search for 'App passwords' in Google Account Security search bar, or visit direct link: myaccount.google.com/apppasswords"
+                },
+                {
+                  step: 3,
+                  title: "Create App Password",
+                  desc: "Enter 'OmniReach' or 'Cold Email' as the App Name, and click the 'Create' button."
+                },
+                {
+                  step: 4,
+                  title: "Copy the 16-Character Code",
+                  desc: "Google will display a yellow box with a 16-letter code (e.g. 'qfea nsqq iwvc pojz'). Copy this code without spaces into OmniReach!"
+                }
+              ].map(item => (
+                <div key={item.step} style={{ display: 'flex', gap: '0.85rem', background: '#0a0f1b', padding: '0.85rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                  <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: '#f59e0b', color: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '0.875rem', flexShrink: 0 }}>
+                    {item.step}
                   </div>
-                  <div style={{ width: '100%', height: '8px', background: '#0e1422', borderRadius: '4px', overflow: 'hidden' }}>
-                    <div
-                      style={{
-                        height: '100%',
-                        background: 'linear-gradient(90deg, #3b82f6, #10b981)',
-                        width: `${dispatchStatus.total ? (dispatchStatus.sent / dispatchStatus.total) * 100 : 0}%`,
-                        transition: 'width 0.3s ease'
-                      }}
-                    />
+                  <div>
+                    <strong style={{ color: '#fff', fontSize: '0.9rem', display: 'block', marginBottom: '0.2rem' }}>{item.title}</strong>
+                    <span style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem', lineHeight: '1.5' }}>{item.desc}</span>
                   </div>
                 </div>
-
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.75rem', textAlign: 'center' }}>
-                  <div style={{ background: '#111827', padding: '0.75rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
-                    <span style={{ fontSize: '0.725rem', color: 'var(--text-secondary)' }}>SENT</span>
-                    <p style={{ fontSize: '1.35rem', fontWeight: 800, color: '#34d399' }}>{dispatchStatus.sent}</p>
-                  </div>
-                  <div style={{ background: '#111827', padding: '0.75rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
-                    <span style={{ fontSize: '0.725rem', color: 'var(--text-secondary)' }}>SKIPPED</span>
-                    <p style={{ fontSize: '1.35rem', fontWeight: 800, color: '#fbbf24' }}>{dispatchStatus.skipped}</p>
-                  </div>
-                  <div style={{ background: '#111827', padding: '0.75rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
-                    <span style={{ fontSize: '0.725rem', color: 'var(--text-secondary)' }}>FAILED</span>
-                    <p style={{ fontSize: '1.35rem', fontWeight: 800, color: '#fb7185' }}>{dispatchStatus.failed}</p>
-                  </div>
-                </div>
-              </div>
+              ))}
             </div>
 
-            {/* Terminal Live Logs */}
-            <div className="glass-card" style={{ background: '#0a0e17' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-                <span style={{ fontSize: '0.8125rem', fontWeight: 600, color: 'var(--text-secondary)', fontFamily: 'monospace' }}>
-                  LIVE DISPATCH CONSOLE LOGS
-                </span>
-                <span style={{ fontSize: '0.725rem', color: 'var(--text-muted)' }}>Auto-updating</span>
-              </div>
-              <div
-                style={{
-                  height: '240px',
-                  overflowY: 'auto',
-                  background: '#060911',
-                  borderRadius: '6px',
-                  padding: '0.85rem',
-                  fontFamily: 'monospace',
-                  fontSize: '0.78rem',
-                  border: '1px solid #1a2333',
-                  lineHeight: '1.6'
-                }}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <a
+                href="https://myaccount.google.com/apppasswords"
+                target="_blank"
+                rel="noreferrer"
+                className="btn btn-outline"
+                style={{ fontSize: '0.8rem', color: '#38bdf8', borderColor: '#38bdf8', textDecoration: 'none' }}
               >
-                {dispatchStatus.logs.length === 0 ? (
-                  <p style={{ color: 'var(--text-muted)' }}>[READY] No dispatch session initiated yet. Click "Launch Dispatch" above to begin.</p>
-                ) : (
-                  dispatchStatus.logs.map((log, idx) => (
-                    <div key={idx} style={{ color: log.status === 'sent' ? '#34d399' : log.status === 'failed' ? '#fb7185' : '#fbbf24' }}>
-                      [{log.timestamp || new Date().toLocaleTimeString()}] [{log.status.toUpperCase()}] -&gt; {log.email} ({log.company || 'Enterprise'})
-                    </div>
-                  ))
-                )}
-              </div>
+                <ExternalLink size={14} /> Open Google App Passwords Page
+              </a>
+              <button onClick={() => setShowAppPasswordGuide(false)} className="btn btn-primary">
+                Got it, Close
+              </button>
             </div>
           </div>
-        )}
-      </main>
+        </div>
+      )}
+
+      {/* ============================================================ */}
+      {/* HOW TO SHARE GOOGLE SHEET MODAL                              */}
+      {/* ============================================================ */}
+      {showHowToShareModal && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(5px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 70, padding: '1.5rem' }}>
+          <div className="glass-card" style={{ width: '100%', maxWidth: '620px', background: '#121829', border: '1px solid #3b82f6' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
+              <h2 style={{ fontSize: '1.25rem', fontWeight: 800, color: '#60a5fa', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <HelpCircle size={20} /> How to Share Your Google Sheet Link
+              </h2>
+              <button onClick={() => setShowHowToShareModal(false)} className="btn btn-outline" style={{ padding: '0.35rem' }}>
+                <XCircle size={18} />
+              </button>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '1.5rem' }}>
+              <div style={{ background: '#0a0f1b', padding: '0.85rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                <strong style={{ color: '#fff', fontSize: '0.9rem', display: 'block', marginBottom: '0.25rem' }}>
+                  Step 1: Click the Share button
+                </strong>
+                <p style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>
+                  Open your Google Sheet and click the big green <strong>Share</strong> button in the top right corner.
+                </p>
+              </div>
+
+              <div style={{ background: '#0a0f1b', padding: '0.85rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                <strong style={{ color: '#fff', fontSize: '0.9rem', display: 'block', marginBottom: '0.25rem' }}>
+                  Step 2: Change General Access to "Anyone with the link"
+                </strong>
+                <p style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>
+                  Under <em>General Access</em>, change <strong>Restricted</strong> to <strong>Anyone with the link</strong> (either Viewer or Editor).
+                </p>
+              </div>
+
+              <div style={{ background: '#0a0f1b', padding: '0.85rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                <strong style={{ color: '#fff', fontSize: '0.9rem', display: 'block', marginBottom: '0.25rem' }}>
+                  Step 3: Copy and Paste the link
+                </strong>
+                <p style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>
+                  Click <strong>Copy link</strong> and paste it directly into the <em>Google Spreadsheet URL</em> box in OmniReach Sheet Studio!
+                </p>
+              </div>
+
+              <div style={{ background: '#0a0f1b', padding: '0.85rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                <strong style={{ color: '#34d399', fontSize: '0.9rem', display: 'block', marginBottom: '0.25rem' }}>
+                  Alternative: Download Excel file (.xlsx)
+                </strong>
+                <p style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>
+                  You can also click <em>File &gt; Download &gt; Microsoft Excel (.xlsx)</em> and drag &amp; drop the file directly into OmniReach.
+                </p>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <button onClick={() => setShowHowToShareModal(false)} className="btn btn-primary">
+                Got it, Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Footer */}
       <footer style={{ borderTop: '1px solid var(--border-color)', padding: '1.25rem 0', background: '#090d16', textAlign: 'center', fontSize: '0.8125rem', color: 'var(--text-muted)' }}>
         <div className="container" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
-          <div>
-            OmniReach Engine • Open Source Cold Email Platform
-          </div>
-          <div>
-            Built with React.js, Node.js &amp; Python • Zero-Bounce DNS Verification
-          </div>
+          <div>OmniReach Engine • Open Source Multi-Tab Cold Email Platform</div>
+          <div>Built with React.js, Node.js &amp; Python • Zero-Bounce DNS Verification</div>
         </div>
       </footer>
     </div>
