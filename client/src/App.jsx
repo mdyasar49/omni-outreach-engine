@@ -2032,13 +2032,15 @@ export default function App() {
                 </div>
 
                 {/* Dark Preview */}
-                <div style={{ background: '#0b0f19', borderRadius: '8px', padding: '1.5rem', textAlign: 'center', marginBottom: '0.75rem', border: '1px solid rgba(255,255,255,0.06)' }}>
-                  <img src="/logo.svg" alt="OmniReach Full Logo Dark" style={{ maxWidth: '100%', height: '54px' }} />
+                <div style={{ background: '#0b0f19', borderRadius: '8px', padding: '1.25rem', textAlign: 'center', marginBottom: '0.75rem', border: '1px solid rgba(255,255,255,0.06)' }}>
+                  <div style={{ fontSize: '0.675rem', color: 'var(--text-muted)', marginBottom: '0.35rem', textAlign: 'left' }}>Dark Background Variant</div>
+                  <img src="/logo.svg" alt="OmniReach Full Logo Dark" style={{ maxWidth: '100%', height: '50px' }} />
                 </div>
 
                 {/* Light Preview */}
-                <div style={{ background: '#ffffff', borderRadius: '8px', padding: '1.5rem', textAlign: 'center', border: '1px solid #e2e8f0' }}>
-                  <img src="/logo.svg" alt="OmniReach Full Logo Light" style={{ maxWidth: '100%', height: '54px' }} />
+                <div style={{ background: '#ffffff', borderRadius: '8px', padding: '1.25rem', textAlign: 'center', border: '1px solid #cbd5e1' }}>
+                  <div style={{ fontSize: '0.675rem', color: '#64748b', marginBottom: '0.35rem', textAlign: 'left' }}>Light Background Variant</div>
+                  <img src="/logo-dark.svg" alt="OmniReach Full Logo Light" style={{ maxWidth: '100%', height: '50px' }} />
                 </div>
               </div>
 
