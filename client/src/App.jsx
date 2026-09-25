@@ -8,8 +8,6 @@ import {
   ChevronRight, Filter, Search, Download, Info, Check, SlidersHorizontal,
   Palette, Copy, Code
 } from 'lucide-react';
-import { DEFAULT_SHEET_DATA } from './data/defaultSheets.js';
-
 const DEFAULT_TEMPLATES = [
   {
     id: "tmpl_jv_partner",
@@ -72,17 +70,7 @@ p { margin-bottom: 14px; }
   }
 ];
 
-const DEFAULT_ACCOUNTS = [
-  {
-    id: "acc_primary",
-    name: "Primary Outreach Sender",
-    email: "outreach@domain.com",
-    smtp_host: "smtp.gmail.com",
-    smtp_port: 587,
-    is_default: true,
-    created_at: new Date().toISOString()
-  }
-];
+const DEFAULT_ACCOUNTS = [];
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('sheet_studio');
@@ -98,11 +86,11 @@ export default function App() {
   const [copiedColor, setCopiedColor] = useState(null);
 
   const [stats, setStats] = useState({
-    accounts_count: 1,
-    default_sender: 'outreach@domain.com',
+    accounts_count: 0,
+    default_sender: 'None Configured',
     templates_count: 2,
-    recipients_count: 65,
-    verified_mx_count: 65,
+    recipients_count: 0,
+    verified_mx_count: 0,
     dead_domain_count: 0,
     dispatched_count: 0,
     delivered_count: 0,
@@ -110,7 +98,7 @@ export default function App() {
     skipped_count: 0
   });
 
-  const [accounts, setAccounts] = useState(DEFAULT_ACCOUNTS);
+  const [accounts, setAccounts] = useState([]);
   const [templates, setTemplates] = useState(DEFAULT_TEMPLATES);
   const [recipients, setRecipients] = useState([]);
   const [dispatchStatus, setDispatchStatus] = useState({
@@ -120,10 +108,10 @@ export default function App() {
   // ==========================================
   // SPREADSHEET & EXCEL MULTI-TAB STATE
   // ==========================================
-  const [sheetUrl, setSheetUrl] = useState('https://docs.google.com/spreadsheets/d/1vl5moxgRvXo-rJOFPYphtqgROb1L29hYxe8JhRQfHE0/edit?gid=1245949174#gid=1245949174');
+  const [sheetUrl, setSheetUrl] = useState('');
   const [sheetLoading, setSheetLoading] = useState(false);
   const [sheetError, setSheetError] = useState(null);
-  const [sheetData, setSheetData] = useState(DEFAULT_SHEET_DATA);
+  const [sheetData, setSheetData] = useState(null);
   const [activeSheetTabIdx, setActiveSheetTabIdx] = useState(0);
   const [sheetSearchQuery, setSheetSearchQuery] = useState('');
   const [showHowToShareModal, setShowHowToShareModal] = useState(false);
@@ -157,16 +145,16 @@ export default function App() {
   const [selectedTemplate, setSelectedTemplate] = useState(DEFAULT_TEMPLATES[0]);
   const [templateForm, setTemplateForm] = useState(DEFAULT_TEMPLATES[0]);
   const [templatePreviewContext, setTemplatePreviewContext] = useState({
-    name: 'Vignesh',
-    company: 'Leadpro Infotech',
-    city: 'Coimbatore',
-    sender_name: 'Mohamed Yasar',
-    sender_email: 'infogenx.dm@gmail.com'
+    name: 'Lead Name',
+    company: 'Company Name',
+    city: 'City',
+    sender_name: 'Your Name',
+    sender_email: 'you@domain.com'
   });
 
   // Dispatch Config
   const [dispatchConfig, setDispatchConfig] = useState({
-    account_id: DEFAULT_ACCOUNTS[0].id,
+    account_id: '',
     template_id: DEFAULT_TEMPLATES[0].id,
     delay_seconds: 5,
     only_verified: false
@@ -819,33 +807,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Quick Demo Pre-set Buttons */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1.25rem', flexWrap: 'wrap' }}>
-              <span style={{ fontSize: '0.775rem', color: 'var(--text-muted)' }}>Quick Load:</span>
-              <button
-                onClick={() => {
-                  const url = 'https://docs.google.com/spreadsheets/d/1vl5moxgRvXo-rJOFPYphtqgROb1L29hYxe8JhRQfHE0/edit?gid=1245949174#gid=1245949174';
-                  setSheetUrl(url);
-                  loadGoogleSheetUrl(url);
-                }}
-                className="btn btn-outline"
-                style={{ fontSize: '0.75rem', padding: '0.35rem 0.75rem', background: '#131d2e' }}
-              >
-                📌 Tamil Nadu Agencies Sheet (6 Tabs, 65 Verified)
-              </button>
-              <button
-                onClick={() => {
-                  const url = 'https://docs.google.com/spreadsheets/d/1igq6E9CxuXEURYa7NcD4B5d03MiSsNIihN_e_DQ5Obs';
-                  setSheetUrl(url);
-                  loadGoogleSheetUrl(url);
-                }}
-                className="btn btn-outline"
-                style={{ fontSize: '0.75rem', padding: '0.35rem 0.75rem', background: '#131d2e' }}
-              >
-                📌 Digital Marketing Executive Leads Sheet
-              </button>
-            </div>
-
             {/* Input Box: Google Sheet URL & File Upload */}
             <div className="glass-card" style={{ marginBottom: '1.5rem', background: '#131b2e' }}>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1.25rem', alignItems: 'center' }}>
@@ -857,7 +818,7 @@ export default function App() {
                   <div style={{ display: 'flex', gap: '0.5rem' }}>
                     <input
                       className="input-field"
-                      placeholder="https://docs.google.com/spreadsheets/d/1vl5moxgRvXo.../edit#gid=0"
+                      placeholder="Paste Google Spreadsheet URL (e.g. https://docs.google.com/spreadsheets/d/...)"
                       value={sheetUrl}
                       onChange={e => setSheetUrl(e.target.value)}
                       onKeyDown={e => { if (e.key === 'Enter') loadGoogleSheetUrl(); }}
@@ -1087,11 +1048,11 @@ export default function App() {
                   Paste a Google Spreadsheet link above or upload an Excel file to view all tabs and dispatch cold outreach directly.
                 </p>
                 <div style={{ display: 'flex', justifyContent: 'center', gap: '0.75rem' }}>
-                  <button onClick={() => loadGoogleSheetUrl()} className="btn btn-primary">
-                    Load Demo Google Sheet
+                  <button onClick={() => fileInputRef.current?.click()} className="btn btn-primary">
+                    <Upload size={14} /> Upload Excel / CSV File (.xlsx, .csv)
                   </button>
-                  <button onClick={() => fileInputRef.current?.click()} className="btn btn-outline">
-                    <Upload size={14} /> Upload .xlsx File
+                  <button onClick={() => setShowHowToShareModal(true)} className="btn btn-outline">
+                    <HelpCircle size={14} /> How to Share Google Sheet
                   </button>
                 </div>
               </div>

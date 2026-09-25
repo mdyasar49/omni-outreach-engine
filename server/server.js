@@ -44,21 +44,7 @@ function writeJSON(file, data) {
 
 // Initialize seed data if not present
 if (!fs.existsSync(ACCOUNTS_FILE)) {
-  writeJSON(ACCOUNTS_FILE, [
-    {
-      id: "acc_default",
-      name: "Primary Outreach (Gmail)",
-      email: "infogenx.dm@gmail.com",
-      smtp_host: "smtp.gmail.com",
-      smtp_port: 587,
-      smtp_user: "infogenx.dm@gmail.com",
-      smtp_pass: "qfeansqqiwvcpojz",
-      secure: false,
-      imap_host: "imap.gmail.com",
-      is_default: true,
-      created_at: new Date().toISOString()
-    }
-  ]);
+  writeJSON(ACCOUNTS_FILE, []);
 }
 
 if (!fs.existsSync(TEMPLATES_FILE)) {
