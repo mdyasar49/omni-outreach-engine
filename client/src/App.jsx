@@ -5,16 +5,101 @@ import {
   AlertTriangle, XCircle, Play, Square, Plus, Trash2, RefreshCw, Eye,
   Globe, Server, ArrowRight, Layers, BarChart3, Database, KeyRound,
   FileSpreadsheet, Upload, Link as LinkIcon, HelpCircle, ExternalLink,
-  ChevronRight, Filter, Search, Download, Info, Check, SlidersHorizontal
+  ChevronRight, Filter, Search, Download, Info, Check, SlidersHorizontal,
+  Palette, Copy, Code
 } from 'lucide-react';
+import { DEFAULT_SHEET_DATA } from './data/defaultSheets.js';
 
-const API_BASE = 'http://localhost:4000/api';
+const DEFAULT_TEMPLATES = [
+  {
+    id: "tmpl_jv_partner",
+    name: "Joint Venture & Revenue-Share Partnership",
+    subject: "Joint Venture Opportunity: Revenue-Share Partner for Established Consultancy",
+    category: "Partnership",
+    html_content: `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8">
+<style>
+body, p, div, table, td { font-family: Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #222; text-align: left !important; margin: 0; padding: 0; }
+p { margin-bottom: 14px; }
+ul { margin: 0 0 14px 20px; padding: 0; text-align: left; }
+li { margin-bottom: 6px; }
+a { color: #0056b3; }
+</style>
+</head>
+<body style="text-align: left; margin: 0; padding: 15px;">
+<div style="text-align: left; max-width: 100%;">
+<p>Dear {{name}},</p>
+<p>I hope this email finds you well at <strong>{{company}}</strong>.</p>
+<p>We are reaching out to discuss a potential revenue-sharing Joint Venture partnership with your agency.</p>
+<p><strong>What We Bring:</strong></p>
+<ul>
+  <li>10+ years delivery pedigree and full technical capabilities in Cloud, AI, and Software Architecture.</li>
+  <li>Proven enterprise case studies and robust delivery infrastructure.</li>
+  <li>Attractive revenue share based strictly on closed deals without upfront retainers.</li>
+</ul>
+<p>If you'd be open to exploring this mutually beneficial collaboration, please reply to this email to set up a quick 10-minute discovery call.</p>
+<p>Best regards,<br>
+<strong>{{sender_name}}</strong><br>
+{{sender_email}}</p>
+</div>
+</body>
+</html>`
+  },
+  {
+    id: "tmpl_b2b_agency",
+    name: "B2B Software & AI Solutions Pitch",
+    subject: "Quick question regarding {{company}}'s digital roadmap in {{city}}",
+    category: "B2B Sales",
+    html_content: `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8">
+<style>
+body, p, div, table, td { font-family: Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #222; text-align: left !important; margin: 0; padding: 0; }
+p { margin-bottom: 14px; }
+</style>
+</head>
+<body style="text-align: left; margin: 0; padding: 15px;">
+<div style="text-align: left; max-width: 100%;">
+<p>Hi {{name}},</p>
+<p>I noticed the high quality of work {{company}} is executing in {{city}} and wanted to reach out.</p>
+<p>We help businesses like yours accelerate their technical roadmap with high-performance custom web applications, automation, and AI pipelines.</p>
+<p>Are you open to a brief conversation this week to see if we can assist your development bandwidth?</p>
+<p>Best,<br><strong>{{sender_name}}</strong></p>
+</div>
+</body>
+</html>`
+  }
+];
+
+const DEFAULT_ACCOUNTS = [
+  {
+    id: "acc_primary",
+    name: "Primary Outreach Sender",
+    email: "outreach@domain.com",
+    smtp_host: "smtp.gmail.com",
+    smtp_port: 587,
+    is_default: true,
+    created_at: new Date().toISOString()
+  }
+];
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('sheet_studio');
+  const [apiBaseUrl, setApiBaseUrl] = useState(() => localStorage.getItem('omnireach_api_url') || 'http://localhost:4000/api');
+  const API_BASE = apiBaseUrl;
+  const [backendOnline, setBackendOnline] = useState(false);
+  const [showApiSettingsModal, setShowApiSettingsModal] = useState(false);
+  const [tempApiUrl, setTempApiUrl] = useState(apiBaseUrl);
+  const [apiPingStatus, setApiPingStatus] = useState(null);
+  const [showBrandKitModal, setShowBrandKitModal] = useState(false);
+  const [previewLead, setPreviewLead] = useState(null);
+  const [previewTemplateId, setPreviewTemplateId] = useState('tmpl_jv_partner');
+  const [copiedColor, setCopiedColor] = useState(null);
+
   const [stats, setStats] = useState({
     accounts_count: 1,
-    default_sender: 'infogenx.dm@gmail.com',
+    default_sender: 'outreach@domain.com',
     templates_count: 2,
     recipients_count: 65,
     verified_mx_count: 65,
@@ -25,8 +110,8 @@ export default function App() {
     skipped_count: 0
   });
 
-  const [accounts, setAccounts] = useState([]);
-  const [templates, setTemplates] = useState([]);
+  const [accounts, setAccounts] = useState(DEFAULT_ACCOUNTS);
+  const [templates, setTemplates] = useState(DEFAULT_TEMPLATES);
   const [recipients, setRecipients] = useState([]);
   const [dispatchStatus, setDispatchStatus] = useState({
     running: false, total: 0, sent: 0, delivered: 0, bounced: 0, failed: 0, skipped: 0, current: '', logs: []
@@ -38,7 +123,7 @@ export default function App() {
   const [sheetUrl, setSheetUrl] = useState('https://docs.google.com/spreadsheets/d/1vl5moxgRvXo-rJOFPYphtqgROb1L29hYxe8JhRQfHE0/edit?gid=1245949174#gid=1245949174');
   const [sheetLoading, setSheetLoading] = useState(false);
   const [sheetError, setSheetError] = useState(null);
-  const [sheetData, setSheetData] = useState(null);
+  const [sheetData, setSheetData] = useState(DEFAULT_SHEET_DATA);
   const [activeSheetTabIdx, setActiveSheetTabIdx] = useState(0);
   const [sheetSearchQuery, setSheetSearchQuery] = useState('');
   const [showHowToShareModal, setShowHowToShareModal] = useState(false);
@@ -69,8 +154,8 @@ export default function App() {
   const [accountTestLoading, setAccountTestLoading] = useState(false);
 
   // Template Form State
-  const [selectedTemplate, setSelectedTemplate] = useState(null);
-  const [templateForm, setTemplateForm] = useState({ name: '', subject: '', category: 'General', html_content: '' });
+  const [selectedTemplate, setSelectedTemplate] = useState(DEFAULT_TEMPLATES[0]);
+  const [templateForm, setTemplateForm] = useState(DEFAULT_TEMPLATES[0]);
   const [templatePreviewContext, setTemplatePreviewContext] = useState({
     name: 'Vignesh',
     company: 'Leadpro Infotech',
@@ -81,42 +166,124 @@ export default function App() {
 
   // Dispatch Config
   const [dispatchConfig, setDispatchConfig] = useState({
-    account_id: '',
-    template_id: '',
+    account_id: DEFAULT_ACCOUNTS[0].id,
+    template_id: DEFAULT_TEMPLATES[0].id,
     delay_seconds: 5,
     only_verified: false
   });
 
-  // Fetch initial data
-  const fetchData = async () => {
+  // Universal Workbook Parser for both Drag-and-Drop and Server/Direct Loads
+  const processWorkbook = (workbook, sourceName) => {
+    const tabs = workbook.SheetNames.map(sheetName => {
+      const sheet = workbook.Sheets[sheetName];
+      const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+      if (rawData.length === 0) {
+        return { name: sheetName, row_count: 0, headers: [], rows: [], detected_columns: {} };
+      }
+
+      const headerRowIndex = rawData.findIndex(r => r.some(cell => String(cell).trim() !== ''));
+      const headers = headerRowIndex !== -1 ? rawData[headerRowIndex].map(h => String(h).trim()) : [];
+      const dataRows = headerRowIndex !== -1 ? rawData.slice(headerRowIndex + 1).filter(r => r.some(c => String(c).trim() !== '')) : [];
+
+      const lowerHeaders = headers.map(h => String(h || '').toLowerCase().trim());
+      const colMap = { email: null, name: null, company: null, city: null };
+
+      const emailKw = ['work email', 'email', 'e-mail', 'mail', 'email address', 'contact email'];
+      for (let kw of emailKw) {
+        const idx = lowerHeaders.findIndex(h => h.includes(kw));
+        if (idx !== -1) { colMap.email = headers[idx]; break; }
+      }
+      if (!colMap.email) {
+        for (let c = 0; c < headers.length; c++) {
+          if (dataRows.some(r => r[c] && String(r[c]).includes('@') && String(r[c]).includes('.'))) {
+            colMap.email = headers[c];
+            break;
+          }
+        }
+      }
+
+      const nameKw = ['contact person', 'name', 'full name', 'person name', 'lead name', 'first name'];
+      for (let kw of nameKw) {
+        const idx = lowerHeaders.findIndex(h => h.includes(kw));
+        if (idx !== -1) { colMap.name = headers[idx]; break; }
+      }
+
+      const compKw = ['company', 'agency', 'company / agency name', 'organization', 'business name'];
+      for (let kw of compKw) {
+        const idx = lowerHeaders.findIndex(h => h.includes(kw));
+        if (idx !== -1) { colMap.company = headers[idx]; break; }
+      }
+
+      const cityKw = ['city', 'location', 'place', 'city / place', 'region'];
+      for (let kw of cityKw) {
+        const idx = lowerHeaders.findIndex(h => h.includes(kw));
+        if (idx !== -1) { colMap.city = headers[idx]; break; }
+      }
+
+      const formattedRows = dataRows.map((row, idx) => {
+        const obj = { _row_index: idx + 1 };
+        headers.forEach((h, colIdx) => {
+          if (h) obj[h] = row[colIdx] !== undefined ? String(row[colIdx]).trim() : '';
+        });
+        obj._detected_email = colMap.email ? obj[colMap.email] : '';
+        obj._detected_name = colMap.name ? obj[colMap.name] : 'Prospective Partner';
+        obj._detected_company = colMap.company ? obj[colMap.company] : 'Your Agency';
+        obj._detected_city = colMap.city ? obj[colMap.city] : 'your region';
+        return obj;
+      });
+
+      return {
+        name: sheetName,
+        row_count: formattedRows.length,
+        headers,
+        detected_columns: colMap,
+        rows: formattedRows
+      };
+    });
+
+    setSheetData({
+      filename: sourceName,
+      total_tabs: tabs.length,
+      tabs
+    });
+    setActiveSheetTabIdx(0);
+  };
+
+  // Fetch initial data from Backend
+  const fetchData = async (overrideUrl) => {
+    const targetBase = overrideUrl || apiBaseUrl;
     try {
-      const [resStats, resAccs, resTmpls, resRecs, resDisp] = await Promise.all([
-        fetch(`${API_BASE}/stats`).then(r => r.json()).catch(() => null),
-        fetch(`${API_BASE}/accounts`).then(r => r.json()).catch(() => []),
-        fetch(`${API_BASE}/templates`).then(r => r.json()).catch(() => []),
-        fetch(`${API_BASE}/recipients`).then(r => r.json()).catch(() => []),
-        fetch(`${API_BASE}/dispatch/status`).then(r => r.json()).catch(() => null)
+      const resStats = await fetch(`${targetBase}/stats`).then(r => r.json()).catch(() => null);
+      if (resStats) {
+        setStats(resStats);
+        setBackendOnline(true);
+      } else {
+        setBackendOnline(false);
+      }
+
+      const [resAccs, resTmpls, resRecs, resDisp] = await Promise.all([
+        fetch(`${targetBase}/accounts`).then(r => r.json()).catch(() => []),
+        fetch(`${targetBase}/templates`).then(r => r.json()).catch(() => []),
+        fetch(`${targetBase}/recipients`).then(r => r.json()).catch(() => []),
+        fetch(`${targetBase}/dispatch/status`).then(r => r.json()).catch(() => null)
       ]);
 
-      if (resStats) setStats(resStats);
       if (resAccs && resAccs.length > 0) {
         setAccounts(resAccs);
         const defAcc = resAccs.find(a => a.is_default) || resAccs[0];
-        if (defAcc && !dispatchConfig.account_id) {
+        if (defAcc) {
           setDispatchConfig(prev => ({ ...prev, account_id: defAcc.id }));
         }
       }
       if (resTmpls && resTmpls.length > 0) {
         setTemplates(resTmpls);
-        if (!selectedTemplate) {
+        if (!selectedTemplate || !resTmpls.find(t => t.id === selectedTemplate.id)) {
           setSelectedTemplate(resTmpls[0]);
           setTemplateForm(resTmpls[0]);
         }
-        if (!dispatchConfig.template_id) {
-          setDispatchConfig(prev => ({ ...prev, template_id: resTmpls[0].id }));
-        }
+        setDispatchConfig(prev => ({ ...prev, template_id: resTmpls[0].id }));
       }
-      if (resRecs) setRecipients(resRecs);
+      if (resRecs && resRecs.length > 0) setRecipients(resRecs);
       if (resDisp) {
         setDispatchStatus(resDisp);
         if (resDisp.running) {
@@ -133,35 +300,38 @@ export default function App() {
         }
       }
     } catch (err) {
-      console.error("Dashboard fetch error:", err);
+      console.warn("Backend connection notice:", err.message);
+      setBackendOnline(false);
     }
   };
 
   useEffect(() => {
     fetchData();
-    loadGoogleSheetUrl(sheetUrl);
 
     const interval = setInterval(async () => {
       try {
-        const d = await fetch(`${API_BASE}/dispatch/status`).then(r => r.json());
-        setDispatchStatus(d);
-        if (d.running) {
-          const s = await fetch(`${API_BASE}/stats`).then(r => r.json());
-          setStats(s);
-        } else if (d.sent > 0 && !dispatchSummaryReport) {
-          setDispatchSummaryReport({
-            total: d.total,
-            sent: d.sent,
-            delivered: d.delivered || d.sent,
-            skipped: d.skipped,
-            bounced: d.bounced,
-            failed: d.failed
-          });
+        const d = await fetch(`${apiBaseUrl}/dispatch/status`).then(r => r.json()).catch(() => null);
+        if (d) {
+          setDispatchStatus(d);
+          setBackendOnline(true);
+          if (d.running) {
+            const s = await fetch(`${apiBaseUrl}/stats`).then(r => r.json()).catch(() => null);
+            if (s) setStats(s);
+          } else if (d.sent > 0 && !dispatchSummaryReport) {
+            setDispatchSummaryReport({
+              total: d.total,
+              sent: d.sent,
+              delivered: d.delivered || d.sent,
+              skipped: d.skipped,
+              bounced: d.bounced,
+              failed: d.failed
+            });
+          }
         }
       } catch (e) {}
-    }, 2500);
+    }, 3000);
     return () => clearInterval(interval);
-  }, []);
+  }, [apiBaseUrl]);
 
   // Load Google Sheet from URL
   const loadGoogleSheetUrl = async (urlToLoad) => {
@@ -173,7 +343,7 @@ export default function App() {
     setSheetLoading(true);
     setSheetError(null);
     try {
-      const res = await fetch(`${API_BASE}/sheets/load-url`, {
+      const res = await fetch(`${apiBaseUrl}/sheets/load-url`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: targetUrl.trim() })
@@ -186,17 +356,33 @@ export default function App() {
         setSheetError(data.error || "Failed to load Google Sheet. Ensure access is set to 'Anyone with the link'.");
       }
     } catch (err) {
-      setSheetError("Network error loading Google Sheet: " + err.message);
+      // In-browser fallback attempt
+      const sheetIdMatch = targetUrl.match(/\/d\/([a-zA-Z0-9-_]+)/);
+      if (sheetIdMatch) {
+        try {
+          const exportUrl = `https://docs.google.com/spreadsheets/d/${sheetIdMatch[1]}/export?format=xlsx`;
+          const directRes = await fetch(exportUrl);
+          if (directRes.ok) {
+            const buf = await directRes.arrayBuffer();
+            const data = new Uint8Array(buf);
+            const workbook = XLSX.read(data, { type: 'array' });
+            processWorkbook(workbook, `Google Sheet (${sheetIdMatch[1].slice(0, 8)}...)`);
+            setSheetLoading(false);
+            return;
+          }
+        } catch (e) {
+          console.warn("Direct Google Sheet fetch failed:", e);
+        }
+      }
+      setSheetError("Could not reach backend at " + apiBaseUrl + ". You can drop an Excel (.xlsx) file directly into the box, or click 'Configure API' in header.");
     } finally {
       setSheetLoading(false);
     }
   };
 
-  // Handle Local File Upload (.xlsx, .xls, .csv)
-  const handleFileUpload = (e) => {
-    const file = e.target.files[0];
+  // Process Local File (.xlsx, .xls, .csv)
+  const processLocalFile = (file) => {
     if (!file) return;
-
     setSheetLoading(true);
     setSheetError(null);
 
@@ -205,80 +391,7 @@ export default function App() {
       try {
         const data = new Uint8Array(evt.target.result);
         const workbook = XLSX.read(data, { type: 'array' });
-
-        const tabs = workbook.SheetNames.map(sheetName => {
-          const sheet = workbook.Sheets[sheetName];
-          const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
-          if (rawData.length === 0) {
-            return { name: sheetName, row_count: 0, headers: [], rows: [], detected_columns: {} };
-          }
-
-          const headerRowIndex = rawData.findIndex(r => r.some(cell => String(cell).trim() !== ''));
-          const headers = headerRowIndex !== -1 ? rawData[headerRowIndex].map(h => String(h).trim()) : [];
-          const dataRows = headerRowIndex !== -1 ? rawData.slice(headerRowIndex + 1).filter(r => r.some(c => String(c).trim() !== '')) : [];
-
-          const lowerHeaders = headers.map(h => String(h || '').toLowerCase().trim());
-          const colMap = { email: null, name: null, company: null, city: null };
-
-          const emailKw = ['work email', 'email', 'e-mail', 'mail', 'email address', 'contact email'];
-          for (let kw of emailKw) {
-            const idx = lowerHeaders.findIndex(h => h.includes(kw));
-            if (idx !== -1) { colMap.email = headers[idx]; break; }
-          }
-          if (!colMap.email) {
-            for (let c = 0; c < headers.length; c++) {
-              if (dataRows.some(r => r[c] && String(r[c]).includes('@') && String(r[c]).includes('.'))) {
-                colMap.email = headers[c];
-                break;
-              }
-            }
-          }
-
-          const nameKw = ['contact person', 'name', 'full name', 'person name', 'lead name', 'first name'];
-          for (let kw of nameKw) {
-            const idx = lowerHeaders.findIndex(h => h.includes(kw));
-            if (idx !== -1) { colMap.name = headers[idx]; break; }
-          }
-
-          const compKw = ['company', 'agency', 'company / agency name', 'organization', 'business name'];
-          for (let kw of compKw) {
-            const idx = lowerHeaders.findIndex(h => h.includes(kw));
-            if (idx !== -1) { colMap.company = headers[idx]; break; }
-          }
-
-          const cityKw = ['city', 'location', 'place', 'city / place', 'region'];
-          for (let kw of cityKw) {
-            const idx = lowerHeaders.findIndex(h => h.includes(kw));
-            if (idx !== -1) { colMap.city = headers[idx]; break; }
-          }
-
-          const formattedRows = dataRows.map((row, idx) => {
-            const obj = { _row_index: idx + 1 };
-            headers.forEach((h, colIdx) => {
-              if (h) obj[h] = row[colIdx] !== undefined ? String(row[colIdx]).trim() : '';
-            });
-            obj._detected_email = colMap.email ? obj[colMap.email] : '';
-            obj._detected_name = colMap.name ? obj[colMap.name] : 'Prospective Partner';
-            obj._detected_company = colMap.company ? obj[colMap.company] : 'Your Agency';
-            obj._detected_city = colMap.city ? obj[colMap.city] : 'your region';
-            return obj;
-          });
-
-          return {
-            name: sheetName,
-            row_count: formattedRows.length,
-            headers,
-            detected_columns: colMap,
-            rows: formattedRows
-          };
-        });
-
-        setSheetData({
-          filename: file.name,
-          total_tabs: tabs.length,
-          tabs
-        });
-        setActiveSheetTabIdx(0);
+        processWorkbook(workbook, file.name);
       } catch (err) {
         setSheetError("Failed to parse file: " + err.message);
       } finally {
@@ -286,6 +399,35 @@ export default function App() {
       }
     };
     reader.readAsArrayBuffer(file);
+  };
+
+  const handleFileUpload = (e) => {
+    if (e.target.files && e.target.files[0]) {
+      processLocalFile(e.target.files[0]);
+    }
+  };
+
+  const handleFileDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      processLocalFile(e.dataTransfer.files[0]);
+    }
+  };
+
+  const downloadAsset = (filename, url) => {
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const copyToClipboard = (text, key) => {
+    navigator.clipboard.writeText(text);
+    setCopiedColor(key);
+    setTimeout(() => setCopiedColor(null), 2000);
   };
 
   // CSV Report Download Function
@@ -501,7 +643,11 @@ export default function App() {
         <div className="container" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.75rem' }}>
           
           {/* Brand Logo & Title */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem' }}>
+          <div
+            style={{ display: 'flex', alignItems: 'center', gap: '0.85rem', cursor: 'pointer' }}
+            onClick={() => setShowBrandKitModal(true)}
+            title="Click to view Brand Kit & Vector Assets"
+          >
             <img
               src="/favicon.svg"
               alt="OmniReach Logo"
@@ -511,9 +657,8 @@ export default function App() {
                 borderRadius: '12px',
                 boxShadow: '0 4px 14px rgba(37, 99, 235, 0.45)',
                 transition: 'transform 0.2s ease',
-                cursor: 'pointer'
               }}
-              onMouseEnter={e => e.currentTarget.style.transform = 'scale(1.05)'}
+              onMouseEnter={e => e.currentTarget.style.transform = 'scale(1.06)'}
               onMouseLeave={e => e.currentTarget.style.transform = 'scale(1)'}
             />
             <div>
@@ -528,10 +673,37 @@ export default function App() {
           </div>
 
           {/* Quick Header Actions */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', flexWrap: 'wrap' }}>
+            {/* Brand Kit & Logo Assets Button */}
+            <button
+              onClick={() => setShowBrandKitModal(true)}
+              className="btn btn-outline"
+              style={{ fontSize: '0.75rem', padding: '0.45rem 0.75rem', color: '#38bdf8', borderColor: 'rgba(56, 189, 248, 0.4)', background: 'rgba(56, 189, 248, 0.08)' }}
+              title="View & Download official SVG Logo and Favicon Brand Kit"
+            >
+              <Palette size={14} /> Brand Kit &amp; Logo
+            </button>
+
+            {/* Backend Server Status / Switcher */}
+            <button
+              onClick={() => { setTempApiUrl(apiBaseUrl); setApiPingStatus(null); setShowApiSettingsModal(true); }}
+              className="btn btn-outline"
+              style={{
+                fontSize: '0.75rem',
+                padding: '0.45rem 0.75rem',
+                borderColor: backendOnline ? 'rgba(16, 185, 129, 0.4)' : 'rgba(245, 158, 11, 0.4)',
+                color: backendOnline ? '#34d399' : '#fbbf24',
+                background: backendOnline ? 'rgba(16, 185, 129, 0.08)' : 'rgba(245, 158, 11, 0.08)'
+              }}
+              title="Click to configure or test Backend API connection"
+            >
+              <Server size={14} />
+              <span>{backendOnline ? 'Backend: Online' : 'API: Demo / Offline'}</span>
+            </button>
+
             {/* Active Sender Indicator */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#141d2e', padding: '0.4rem 0.85rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
-              <span className="live-pulse"></span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#141d2e', padding: '0.4rem 0.75rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+              <span className="live-pulse" style={{ background: backendOnline ? '#10b981' : '#f59e0b' }}></span>
               <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Sender:</span>
               <span style={{ fontSize: '0.8125rem', fontWeight: 600, color: '#38bdf8' }}>
                 {accounts.find(a => a.is_default)?.email || 'None Configured'}
@@ -542,27 +714,27 @@ export default function App() {
             <button
               onClick={exportDeliveryReportToCSV}
               className="btn btn-outline"
-              style={{ fontSize: '0.75rem', padding: '0.45rem 0.8rem', color: '#34d399', borderColor: 'rgba(16, 185, 129, 0.4)' }}
+              style={{ fontSize: '0.75rem', padding: '0.45rem 0.75rem', color: '#34d399', borderColor: 'rgba(16, 185, 129, 0.4)' }}
               title="Download delivery & outreach results as CSV"
             >
-              <Download size={14} /> Export CSV Report
+              <Download size={14} /> Export CSV
             </button>
 
             {/* Quick App Password Helper Button */}
             <button
               onClick={() => setShowAppPasswordGuide(true)}
               className="btn btn-outline"
-              style={{ fontSize: '0.75rem', padding: '0.45rem 0.8rem', borderColor: '#f59e0b', color: '#fbbf24' }}
+              style={{ fontSize: '0.75rem', padding: '0.45rem 0.75rem', borderColor: '#f59e0b', color: '#fbbf24' }}
               title="How to generate Gmail App Password"
             >
-              <KeyRound size={14} /> App Password Guide
+              <KeyRound size={14} /> App Password Steps
             </button>
 
             {/* Add Sender Account */}
             <button
               onClick={() => { setActiveTab('accounts'); setShowAddAccount(true); }}
               className="btn btn-primary"
-              style={{ fontSize: '0.75rem', padding: '0.45rem 0.8rem' }}
+              style={{ fontSize: '0.75rem', padding: '0.45rem 0.75rem' }}
             >
               <Plus size={14} /> Add Sender Account
             </button>
@@ -716,6 +888,8 @@ export default function App() {
                   />
                   <div
                     onClick={() => fileInputRef.current?.click()}
+                    onDragOver={e => { e.preventDefault(); e.stopPropagation(); }}
+                    onDrop={handleFileDrop}
                     style={{
                       border: '2px dashed var(--border-color)',
                       borderRadius: '8px',
@@ -856,6 +1030,7 @@ export default function App() {
                     <thead>
                       <tr>
                         <th style={{ width: '50px' }}>#</th>
+                        <th style={{ width: '85px', textAlign: 'center' }}>Preview</th>
                         {activeTabObj?.headers.map((h, i) => (
                           <th key={i}>
                             {h}
@@ -871,6 +1046,17 @@ export default function App() {
                         filteredRows.map((row, rowIdx) => (
                           <tr key={rowIdx}>
                             <td style={{ color: 'var(--text-muted)', fontFamily: 'monospace' }}>{rowIdx + 1}</td>
+                            <td style={{ textAlign: 'center' }}>
+                              <button
+                                onClick={() => setPreviewLead(row)}
+                                className="btn btn-outline"
+                                style={{ padding: '0.2rem 0.5rem', fontSize: '0.72rem', gap: '0.25rem', borderColor: 'rgba(56, 189, 248, 0.4)', color: '#38bdf8' }}
+                                title="Preview personalized email for this lead"
+                              >
+                                <Eye size={12} />
+                                <span>Preview</span>
+                              </button>
+                            </td>
                             {activeTabObj.headers.map((h, colIdx) => {
                               const val = row[h] || '';
                               const isEmail = h === activeTabObj.detected_columns?.email;
@@ -884,7 +1070,7 @@ export default function App() {
                         ))
                       ) : (
                         <tr>
-                          <td colSpan={activeTabObj?.headers.length + 1 || 5} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
+                          <td colSpan={(activeTabObj?.headers.length || 4) + 2} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
                             No matching records found in this tab.
                           </td>
                         </tr>
@@ -1803,6 +1989,328 @@ export default function App() {
             <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
               <button onClick={() => setShowHowToShareModal(false)} className="btn btn-primary">
                 Got it, Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================ */}
+      {/* 1. BRAND KIT & VECTOR ASSETS MODAL                            */}
+      {/* ============================================================ */}
+      {showBrandKitModal && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(8px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 85, padding: '1.5rem' }}>
+          <div className="glass-card" style={{ width: '100%', maxWidth: '820px', maxHeight: '90vh', overflowY: 'auto', background: '#0d1322', border: '1px solid #38bdf8', padding: '1.75rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', borderBottom: '1px solid var(--border-color)', paddingBottom: '1rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                <div style={{ background: 'rgba(56, 189, 248, 0.15)', padding: '0.5rem', borderRadius: '10px' }}>
+                  <Palette size={24} color="#38bdf8" />
+                </div>
+                <div>
+                  <h2 style={{ fontSize: '1.35rem', fontWeight: 900, color: '#fff' }}>OmniReach Brand &amp; Vector Assets</h2>
+                  <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Official vector logomarks, favicon icons, and brand tokens</p>
+                </div>
+              </div>
+              <button onClick={() => setShowBrandKitModal(false)} className="btn btn-outline" style={{ padding: '0.4rem' }}>
+                <XCircle size={18} />
+              </button>
+            </div>
+
+            {/* Asset Showcase Grid */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: '1.25rem', marginBottom: '1.75rem' }}>
+              {/* Full Logo Preview Box */}
+              <div style={{ background: '#080c16', border: '1px solid var(--border-color)', borderRadius: '12px', padding: '1.25rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                  <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#38bdf8' }}>Official Vector Logo</span>
+                  <button
+                    onClick={() => downloadAsset('omnireach-logo.svg', '/logo.svg')}
+                    className="btn btn-outline"
+                    style={{ fontSize: '0.75rem', padding: '0.35rem 0.65rem', borderColor: '#38bdf8', color: '#38bdf8' }}
+                  >
+                    <Download size={13} /> Download SVG
+                  </button>
+                </div>
+
+                {/* Dark Preview */}
+                <div style={{ background: '#0b0f19', borderRadius: '8px', padding: '1.5rem', textAlign: 'center', marginBottom: '0.75rem', border: '1px solid rgba(255,255,255,0.06)' }}>
+                  <img src="/logo.svg" alt="OmniReach Full Logo Dark" style={{ maxWidth: '100%', height: '54px' }} />
+                </div>
+
+                {/* Light Preview */}
+                <div style={{ background: '#ffffff', borderRadius: '8px', padding: '1.5rem', textAlign: 'center', border: '1px solid #e2e8f0' }}>
+                  <img src="/logo.svg" alt="OmniReach Full Logo Light" style={{ maxWidth: '100%', height: '54px' }} />
+                </div>
+              </div>
+
+              {/* Favicon & App Icon Preview Box */}
+              <div style={{ background: '#080c16', border: '1px solid var(--border-color)', borderRadius: '12px', padding: '1.25rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                  <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#10b981' }}>Favicon &amp; App Icon</span>
+                  <button
+                    onClick={() => downloadAsset('omnireach-favicon.svg', '/favicon.svg')}
+                    className="btn btn-outline"
+                    style={{ fontSize: '0.75rem', padding: '0.35rem 0.65rem', borderColor: '#10b981', color: '#34d399' }}
+                  >
+                    <Download size={13} /> Download SVG
+                  </button>
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '2rem', padding: '2rem 1rem', background: '#0b0f19', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.06)' }}>
+                  <div style={{ textAlign: 'center' }}>
+                    <img src="/favicon.svg" alt="Favicon 64px" style={{ width: '64px', height: '64px', borderRadius: '14px', boxShadow: '0 4px 16px rgba(37, 99, 235, 0.5)' }} />
+                    <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.4rem' }}>64 x 64</div>
+                  </div>
+                  <div style={{ textAlign: 'center' }}>
+                    <img src="/favicon.svg" alt="Favicon 48px" style={{ width: '48px', height: '48px', borderRadius: '10px' }} />
+                    <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.4rem' }}>48 x 48</div>
+                  </div>
+                  <div style={{ textAlign: 'center' }}>
+                    <img src="/favicon.svg" alt="Favicon 32px" style={{ width: '32px', height: '32px', borderRadius: '8px' }} />
+                    <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.4rem' }}>32 x 32</div>
+                  </div>
+                </div>
+
+                <div style={{ marginTop: '0.85rem', fontSize: '0.75rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                  Geometric origami stealth jet with glowing outreach orbital ring and emerald DNS deliverability checkmark.
+                </div>
+              </div>
+            </div>
+
+            {/* Brand Color Swatches */}
+            <div style={{ marginBottom: '1.75rem' }}>
+              <h3 style={{ fontSize: '0.95rem', fontWeight: 800, color: '#fff', marginBottom: '0.75rem' }}>Brand Color Palette</h3>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(115px, 1fr))', gap: '0.75rem' }}>
+                {[
+                  { name: 'Void Dark', hex: '#0B0F19', text: '#fff' },
+                  { name: 'Slate Surface', hex: '#0F172A', text: '#fff' },
+                  { name: 'Electric Cyan', hex: '#38BDF8', text: '#000' },
+                  { name: 'Royal Cobalt', hex: '#2563EB', text: '#fff' },
+                  { name: 'Zero-Bounce', hex: '#10B981', text: '#000' },
+                  { name: 'Amber Accent', hex: '#F59E0B', text: '#000' }
+                ].map(c => (
+                  <div
+                    key={c.hex}
+                    onClick={() => copyToClipboard(c.hex, c.hex)}
+                    style={{ background: '#080c16', border: '1px solid var(--border-color)', borderRadius: '8px', padding: '0.5rem', cursor: 'pointer', transition: 'transform 0.15s' }}
+                    onMouseEnter={e => e.currentTarget.style.transform = 'translateY(-2px)'}
+                    onMouseLeave={e => e.currentTarget.style.transform = 'translateY(0)'}
+                  >
+                    <div style={{ height: '36px', borderRadius: '6px', background: c.hex, marginBottom: '0.4rem', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      {copiedColor === c.hex && <Check size={14} color={c.text} />}
+                    </div>
+                    <div style={{ fontSize: '0.725rem', fontWeight: 700, color: '#fff' }}>{c.name}</div>
+                    <div style={{ fontSize: '0.675rem', fontFamily: 'monospace', color: 'var(--text-muted)' }}>
+                      {copiedColor === c.hex ? 'Copied!' : c.hex}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Typography Tokens */}
+            <div style={{ background: '#080c16', border: '1px solid var(--border-color)', borderRadius: '10px', padding: '1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
+              <div>
+                <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#38bdf8' }}>Design Architecture:</span>
+                <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.2rem' }}>
+                  Headings: <strong>Inter ExtraBold (900)</strong> • Body/Code: <strong>JetBrains Mono</strong> • 100% Left-Aligned Standard
+                </p>
+              </div>
+              <span className="badge badge-emerald" style={{ fontSize: '0.75rem' }}>Open Source MIT License</span>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '1.25rem' }}>
+              <button onClick={() => setShowBrandKitModal(false)} className="btn btn-primary">
+                Done &amp; Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================ */}
+      {/* 2. PERSONALIZED EMAIL LIVE PREVIEW MODAL                      */}
+      {/* ============================================================ */}
+      {previewLead && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(8px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 85, padding: '1.5rem' }}>
+          <div className="glass-card" style={{ width: '100%', maxWidth: '720px', maxHeight: '90vh', overflowY: 'auto', background: '#0d1322', border: '1px solid #38bdf8', padding: '1.75rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem', borderBottom: '1px solid var(--border-color)', paddingBottom: '0.75rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <Eye size={20} color="#38bdf8" />
+                <h2 style={{ fontSize: '1.15rem', fontWeight: 800, color: '#fff' }}>
+                  Personalized Email Preview
+                </h2>
+              </div>
+              <button onClick={() => setPreviewLead(null)} className="btn btn-outline" style={{ padding: '0.35rem' }}>
+                <XCircle size={18} />
+              </button>
+            </div>
+
+            {/* Recipient Metadata Banner */}
+            <div style={{ background: '#080c16', padding: '0.85rem 1rem', borderRadius: '8px', border: '1px solid var(--border-color)', marginBottom: '1.25rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.75rem', fontSize: '0.8rem' }}>
+              <div>
+                <span style={{ color: 'var(--text-muted)' }}>To Recipient:</span>
+                <div style={{ fontWeight: 600, color: '#38bdf8', fontFamily: 'monospace' }}>
+                  {previewLead._detected_email || previewLead['Work Email'] || 'Not detected'}
+                </div>
+              </div>
+              <div>
+                <span style={{ color: 'var(--text-muted)' }}>Lead Name:</span>
+                <div style={{ fontWeight: 600, color: '#fff' }}>
+                  {previewLead._detected_name || previewLead['Contact Person'] || 'Partner'}
+                </div>
+              </div>
+              <div>
+                <span style={{ color: 'var(--text-muted)' }}>Company:</span>
+                <div style={{ fontWeight: 600, color: '#34d399' }}>
+                  {previewLead._detected_company || previewLead['Agency Name'] || 'Agency'}
+                </div>
+              </div>
+              <div>
+                <span style={{ color: 'var(--text-muted)' }}>City:</span>
+                <div style={{ fontWeight: 600, color: '#fbbf24' }}>
+                  {previewLead._detected_city || previewLead['City'] || 'Tamil Nadu'}
+                </div>
+              </div>
+            </div>
+
+            {/* Template Chooser */}
+            <div style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+              <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Select Template:</span>
+              <select
+                className="input-field"
+                style={{ width: 'auto', padding: '0.35rem 0.75rem', fontSize: '0.8rem' }}
+                value={previewTemplateId}
+                onChange={e => setPreviewTemplateId(e.target.value)}
+              >
+                {templates.map(t => (
+                  <option key={t.id} value={t.id}>{t.name}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Rendered Email Card */}
+            {(() => {
+              const tmpl = templates.find(t => t.id === previewTemplateId) || templates[0] || DEFAULT_TEMPLATES[0];
+              const leadName = previewLead._detected_name || previewLead['Contact Person'] || 'Partner';
+              const leadComp = previewLead._detected_company || previewLead['Agency Name'] || 'Your Agency';
+              const leadCity = previewLead._detected_city || previewLead['City'] || 'your area';
+              const sender = accounts.find(a => a.is_default) || accounts[0] || DEFAULT_ACCOUNTS[0];
+
+              const subjectRendered = (tmpl.subject || '')
+                .replace(/{{name}}/g, leadName)
+                .replace(/{{company}}/g, leadComp)
+                .replace(/{{city}}/g, leadCity);
+
+              const bodyRendered = (tmpl.html_content || '')
+                .replace(/{{name}}/g, leadName)
+                .replace(/{{company}}/g, leadComp)
+                .replace(/{{city}}/g, leadCity)
+                .replace(/{{sender_name}}/g, sender.name || 'Mohamed Yasar')
+                .replace(/{{sender_email}}/g, sender.email || 'outreach@domain.com');
+
+              return (
+                <div style={{ background: '#ffffff', color: '#1e293b', borderRadius: '10px', overflow: 'hidden', border: '1px solid #cbd5e1' }}>
+                  <div style={{ background: '#f8fafc', padding: '0.75rem 1rem', borderBottom: '1px solid #e2e8f0', fontSize: '0.825rem' }}>
+                    <div style={{ marginBottom: '0.25rem' }}>
+                      <strong style={{ color: '#475569' }}>From:</strong> {sender.name || 'OmniReach'} &lt;{sender.email}&gt;
+                    </div>
+                    <div>
+                      <strong style={{ color: '#475569' }}>Subject:</strong> <span style={{ color: '#0f172a', fontWeight: 600 }}>{subjectRendered}</span>
+                    </div>
+                  </div>
+                  <div
+                    style={{ padding: '1.25rem', fontSize: '0.875rem', lineHeight: 1.6, textAlign: 'left', minHeight: '160px' }}
+                    dangerouslySetInnerHTML={{ __html: bodyRendered }}
+                  />
+                </div>
+              );
+            })()}
+
+            {/* Zero-Bounce Verification Badge */}
+            <div style={{ marginTop: '1.25rem', padding: '0.75rem', borderRadius: '8px', background: 'rgba(16, 185, 129, 0.1)', border: '1px solid rgba(16, 185, 129, 0.3)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8rem', color: '#34d399' }}>
+                <ShieldCheck size={16} />
+                <span>Zero-Bounce Protected • Pre-flight Authoritative DNS MX Check Active</span>
+              </div>
+              <button onClick={() => setPreviewLead(null)} className="btn btn-primary" style={{ fontSize: '0.75rem', padding: '0.35rem 0.75rem' }}>
+                Close Preview
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================ */}
+      {/* 3. API & BACKEND SERVER SETTINGS MODAL                        */}
+      {/* ============================================================ */}
+      {showApiSettingsModal && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(8px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 85, padding: '1.5rem' }}>
+          <div className="glass-card" style={{ width: '100%', maxWidth: '540px', background: '#0d1322', border: '1px solid #3b82f6', padding: '1.75rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
+              <h2 style={{ fontSize: '1.2rem', fontWeight: 800, color: '#60a5fa', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <Server size={20} /> Backend API &amp; Server Settings
+              </h2>
+              <button onClick={() => setShowApiSettingsModal(false)} className="btn btn-outline" style={{ padding: '0.35rem' }}>
+                <XCircle size={18} />
+              </button>
+            </div>
+
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.825rem', marginBottom: '1.25rem' }}>
+              Configure the connection to your Node.js outreach engine. Run <code>npm start</code> in the <code>server/</code> folder for local dispatch, or point to your cloud VPS.
+            </p>
+
+            <div style={{ marginBottom: '1.25rem' }}>
+              <label className="input-label">API Base URL</label>
+              <input
+                className="input-field"
+                value={tempApiUrl}
+                onChange={e => setTempApiUrl(e.target.value)}
+                placeholder="http://localhost:4000/api"
+              />
+            </div>
+
+            {/* Test Server Ping */}
+            <div style={{ marginBottom: '1.25rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+              <button
+                type="button"
+                className="btn btn-outline"
+                style={{ fontSize: '0.8rem' }}
+                onClick={async () => {
+                  setApiPingStatus('testing');
+                  try {
+                    const res = await fetch(`${tempApiUrl}/stats`);
+                    if (res.ok) {
+                      setApiPingStatus('online');
+                    } else {
+                      setApiPingStatus('error');
+                    }
+                  } catch (e) {
+                    setApiPingStatus('unreachable');
+                  }
+                }}
+              >
+                <RefreshCw size={14} /> Test Server Ping
+              </button>
+
+              {apiPingStatus === 'testing' && <span style={{ fontSize: '0.8rem', color: '#38bdf8' }}>Pinging server...</span>}
+              {apiPingStatus === 'online' && <span style={{ fontSize: '0.8rem', color: '#34d399', display: 'flex', alignItems: 'center', gap: '0.3rem' }}><CheckCircle2 size={14} /> Server reachable &amp; active!</span>}
+              {apiPingStatus === 'unreachable' && <span style={{ fontSize: '0.8rem', color: '#fb7185', display: 'flex', alignItems: 'center', gap: '0.3rem' }}><AlertTriangle size={14} /> Server offline or unreachable.</span>}
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem' }}>
+              <button onClick={() => setShowApiSettingsModal(false)} className="btn btn-outline">
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  localStorage.setItem('omnireach_api_url', tempApiUrl);
+                  setApiBaseUrl(tempApiUrl);
+                  fetchData(tempApiUrl);
+                  setShowApiSettingsModal(false);
+                }}
+                className="btn btn-primary"
+              >
+                Save &amp; Connect
               </button>
             </div>
           </div>
